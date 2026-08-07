@@ -1,0 +1,24 @@
+# Dependencies - regenerated via `npm install`, not tracked
+node_modules/
+
+# Cloudflare's local build/state cache, created whenever `wrangler` runs
+.wrangler/
+
+# Local, non-secret settings the installer remembers between runs
+# (e.g. your Worker name) - see bin/bot-config.js. Personal to whoever
+# ran setup/upgrade locally; shouldn't be shared or committed.
+bin/saved-settings.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor folders
+.vscode/
+.idea/
+
+# If a local secrets file is ever added later (none currently exist -
+# secrets go straight to `wrangler secret put` / Apps Script Script
+# Properties, never to disk here), ignore it too:
+.env
+.env.*
