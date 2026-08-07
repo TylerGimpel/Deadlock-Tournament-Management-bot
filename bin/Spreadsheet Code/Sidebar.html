@@ -1,0 +1,931 @@
+<!--
+  Bot version: 20260724.1 (unchanged since at least this point - no earlier record kept)
+  =====================================================================
+  Sidebar.html - Deadlock Tournament Management Bot
+  =====================================================================
+  This sidebar is the entire UI for the Deadlock Tournament Management Bot.
+
+  Layout (top to bottom):
+  - Start Round (createMatchThreads()) - the main button, kicks off a
+    round: creates match threads, coinflip, side selection etc.
+  - Bot Settings - Discord IDs + match thread message. Collapsible.
+  - Fetch Draft Data - pulls results from Statlocker into the sheet.
+  - Spreadsheet Settings - column layout + debug log toggle. Collapsible.
+  - Complete Event - pinned to the bottom of the sidebar via
+    position:fixed on #completeEventFooter (regardless of window
+    height), rather than living in the flow with everything else.
+
+  Both Settings panels write into the SAME saved config (there's only
+  one config blob server-side - see Code.gs's saveSidebarConfig), so
+  either panel's Save button submits values from every field in both
+  panels, not just its own - see saveAllSettings(). This is safe
+  because every field is loaded into the DOM up front by loadSettings()
+  regardless of which panel (if any) is currently expanded.
+  =====================================================================
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      color: #202124;
+      padding: 4px 2px 84px;
+    }
+
+    h4 {
+      margin: 4px 0 8px;
+    }
+
+    #sourceInfo {
+      font-size: 12px;
+      color: #5f6368;
+      margin-bottom: 10px;
+      padding: 6px 8px;
+      background: #f1f3f4;
+      border-radius: 4px;
+      line-height: 1.45;
+    }
+
+    button {
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 6px;
+      border: none;
+      border-radius: 4px;
+      background: #4a8be8;
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #5f6368;
+    }
+
+    button:disabled {
+      background: #9aa0a6;
+      cursor: default;
+    }
+
+    #status {
+      margin: 4px 0 10px;
+      font-size: 12px;
+      color: #5f6368;
+      white-space: pre-wrap;
+    }
+
+    #status.ok {
+      color: #188038;
+    }
+
+    #status.error {
+      color: #c5221f;
+      font-weight: bold;
+    }
+
+    #threadsInfo {
+      font-size: 12px;
+      color: #5f6368;
+      margin-bottom: 10px;
+      padding: 6px 8px;
+      background: #f1f3f4;
+      border-radius: 4px;
+      line-height: 1.45;
+    }
+
+    #threadsStatus {
+      margin: 4px 0 10px;
+      font-size: 12px;
+      color: #5f6368;
+      white-space: pre-wrap;
+    }
+
+    #threadsStatus.ok {
+      color: #188038;
+    }
+
+    #threadsStatus.error {
+      color: #c5221f;
+      font-weight: bold;
+    }
+
+    #debugLogSection {
+      display: none;
+      margin-bottom: 10px;
+    }
+
+    #debugLogHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+
+    #debugLogHeader span {
+      font-size: 12px;
+      font-weight: bold;
+      color: #5f6368;
+    }
+
+    #copyDebugBtn {
+      width: auto;
+      padding: 3px 10px;
+      margin-bottom: 0;
+      font-size: 11px;
+      background: #5f6368;
+    }
+
+    #debugLog {
+      width: 100%;
+      box-sizing: border-box;
+      height: 40px;
+      min-height: 30px;
+      font-family: "Courier New", monospace;
+      font-size: 11px;
+      padding: 6px;
+      border: 1px solid #dadce0;
+      border-bottom: none;
+      border-radius: 4px 4px 0 0;
+      resize: none;
+      white-space: pre;
+    }
+
+    #debugLogResizeHandle {
+      height: 8px;
+      border: 1px solid #dadce0;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      background: transparent;
+      cursor: ns-resize;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 12px 0;
+    }
+
+    .settingsPanel {
+      display: none;
+      margin-top: 10px;
+    }
+
+    .field {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+
+    .field label {
+      flex: 1;
+      font-size: 12px;
+    }
+
+    .field input[type="text"] {
+      width: 60px;
+      text-align: center;
+      text-transform: uppercase;
+      padding: 4px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+
+    .field input.invalid {
+      border-color: #d93025;
+      background: #fce8e6;
+    }
+
+    .field select {
+      padding: 4px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 12px;
+      max-width: 170px;
+    }
+
+    .field input.numericField {
+      width: 130px;
+      text-align: left;
+      text-transform: none;
+    }
+
+    .field.textareaField {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .field.textareaField label {
+      margin-bottom: 4px;
+    }
+
+    .field.textareaField textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: Arial, sans-serif;
+      resize: vertical;
+    }
+
+    #templateHint {
+      font-size: 11px;
+      color: #5f6368;
+      margin: -4px 0 8px;
+    }
+
+    .checkboxField {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 12px 0;
+      font-size: 12px;
+    }
+
+    .saveStatus {
+      margin-top: 8px;
+      font-size: 12px;
+      text-align: center;
+      white-space: pre-wrap;
+    }
+
+    .saveStatus.ok {
+      color: #188038;
+    }
+
+    .saveStatus.error {
+      color: #c5221f;
+      font-weight: bold;
+    }
+
+    #completeEventFooter {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+      box-sizing: border-box;
+    }
+
+    #completeEventFooter button {
+      margin-bottom: 0;
+    }
+
+    #completeEventStatus {
+      margin-top: 6px;
+      font-size: 12px;
+      text-align: center;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+
+    #completeEventStatus.ok {
+      color: #188038;
+    }
+
+    #completeEventStatus.error {
+      color: #c5221f;
+      font-weight: bold;
+    }
+
+    #completeEventStatus a {
+      color: #188038;
+      font-weight: bold;
+    }
+
+    #completeEventModalOverlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 10;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    #completeEventModalOverlay.visible {
+      display: flex;
+    }
+
+    #completeEventModalBox {
+      background: white;
+      border-radius: 6px;
+      padding: 16px;
+      width: 100%;
+      max-width: 340px;
+      max-height: 100%;
+      overflow-y: auto;
+      box-sizing: border-box;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    }
+
+    #completeEventModalBox h4 {
+      margin: 0 0 8px;
+    }
+
+    #completeEventModalBox p {
+      font-size: 12px;
+      line-height: 1.5;
+      color: #202124;
+      white-space: pre-wrap;
+      margin: 0 0 12px;
+    }
+
+    #completeEventModalBox .field {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    #completeEventModalBox .field label {
+      margin-bottom: 4px;
+    }
+
+    #completeEventModalBox input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      text-transform: none;
+      text-align: left;
+      padding: 6px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+
+    #completeEventModalButtons {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    #completeEventModalButtons button {
+      margin-bottom: 0;
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ============================== Start Round ============================== -->
+
+<div id="threadsInfo">
+Select specific rows to create just those threads, or select nothing for every eligible row. Best-of-X series and side-selection overrides are handled automatically - see the Sidebar User Guide for details.
+</div>
+
+<button id="createThreadsBtn">Start Round</button>
+
+<div id="threadsStatus"></div>
+
+<!-- ============================== Bot Settings ============================== -->
+
+<button id="botSettingsToggle" class="secondary">▼ Bot Settings</button>
+
+<div id="botSettingsPanel" class="settingsPanel">
+
+  <div class="field">
+    <label for="discordGuildId">Discord Server ID</label>
+    <input id="discordGuildId" type="text" class="numericField" maxlength="25">
+  </div>
+
+  <div class="field">
+    <label for="discordMatchesForumChannelId">Matches Forum Channel ID</label>
+    <input id="discordMatchesForumChannelId" type="text" class="numericField" maxlength="25">
+  </div>
+
+  <div class="field textareaField">
+    <label for="matchThreadMessageTemplate">Match thread message</label>
+    <textarea id="matchThreadMessageTemplate" rows="8" placeholder="{{team1}} {{team2}} here's your match channel for {{round}}."></textarea>
+  </div>
+  <div id="templateHint">Use {{team1}}, {{team2}}, {{round}}, and {{bestOf}} (renders as "Best of 3", "a single match", etc.) anywhere in the message. You can also tag any other server role by name, e.g. "@Tournament Admin" - it'll be converted into a real ping automatically.</div>
+
+  <button id="saveBtnBot">Save Settings</button>
+
+  <div id="saveStatusBot" class="saveStatus"></div>
+
+</div>
+
+<hr>
+
+<!-- ============================== Fetch Draft Data ============================== -->
+
+<div id="sourceInfo">
+Scans the Draft URL column and fills in match data automatically.
+</div>
+
+<button id="fetchBtn">Fetch Draft Data</button>
+
+<div id="status"></div>
+
+<div id="debugLogSection">
+  <div id="debugLogHeader">
+    <span>Debug log</span>
+    <button id="copyDebugBtn" type="button">Copy</button>
+  </div>
+  <textarea id="debugLog" readonly placeholder="Debug log will appear here after you click Fetch Draft Data."></textarea>
+  <div id="debugLogResizeHandle" title="Drag to resize"></div>
+</div>
+
+<!-- ============================== Spreadsheet Settings ============================== -->
+
+<button id="sheetSettingsToggle" class="secondary">▼ Spreadsheet Settings</button>
+
+<div id="sheetSettingsPanel" class="settingsPanel">
+
+  <div class="field">
+    <label for="draftColumn">Draft URL / code column</label>
+    <input id="draftColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="team1Column">Team 1 column</label>
+    <input id="team1Column" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="team2Column">Team 2 column</label>
+    <input id="team2Column" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="roundColumn">Round column</label>
+    <input id="roundColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="matchIdColumn">Match ID column</label>
+    <input id="matchIdColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="winnerColumn">Winner column</label>
+    <input id="winnerColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="matchLengthColumn">Match Length column</label>
+    <input id="matchLengthColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="picksStartColumn">First pick/ban column</label>
+    <input id="picksStartColumn" type="text" class="columnField" maxlength="3">
+  </div>
+
+  <div class="field">
+    <label for="pickBanOrder">Pick/ban order</label>
+    <select id="pickBanOrder">
+      <option value="groupedByTeam">By team (bans, then picks)</option>
+      <option value="bansFirst">All bans, then all picks</option>
+      <option value="draftOrder">Exact draft order</option>
+    </select>
+  </div>
+
+  <div class="checkboxField">
+    <input id="debugMode" type="checkbox">
+    <label for="debugMode">
+      Show debug log (raw API requests/responses)
+    </label>
+  </div>
+
+  <button id="saveBtnSheet">Save Settings</button>
+
+  <div id="saveStatusSheet" class="saveStatus"></div>
+
+</div>
+
+<div id="completeEventFooter">
+  <button id="completeEventBtn">Complete Event</button>
+  <div id="completeEventStatus"></div>
+</div>
+
+<div id="completeEventModalOverlay">
+  <div id="completeEventModalBox">
+    <h4>Complete this event?</h4>
+    <p>This creates a brand new spreadsheet containing a copy of every tab in this one:
+
+- Every tab's formulas are replaced with their current values in the copy (except tabs with "stats" anywhere in their name, which keep live formulas).
+- The new spreadsheet has none of this project's code, menu, or secrets in it - safe to hand off immediately.
+
+This controller sheet is NOT changed - it keeps all its tabs and live formulas, ready for the next event.</p>
+    <div class="field">
+      <label for="completeEventNameInput">Name for the new spreadsheet</label>
+      <input id="completeEventNameInput" type="text" maxlength="200">
+    </div>
+    <div id="completeEventModalButtons">
+      <button id="completeEventCancelBtn" class="secondary" type="button">Cancel</button>
+      <button id="completeEventConfirmBtn" type="button">Complete Event</button>
+    </div>
+  </div>
+</div>
+
+<script>
+
+const statusEl = document.getElementById('status');
+const fetchBtn = document.getElementById('fetchBtn');
+
+const threadsStatusEl = document.getElementById('threadsStatus');
+const createThreadsBtn = document.getElementById('createThreadsBtn');
+
+const botSettingsToggle = document.getElementById('botSettingsToggle');
+const botSettingsPanel = document.getElementById('botSettingsPanel');
+
+const sheetSettingsToggle = document.getElementById('sheetSettingsToggle');
+const sheetSettingsPanel = document.getElementById('sheetSettingsPanel');
+
+const saveBtnBot = document.getElementById('saveBtnBot');
+const saveStatusBotEl = document.getElementById('saveStatusBot');
+
+const saveBtnSheet = document.getElementById('saveBtnSheet');
+const saveStatusSheetEl = document.getElementById('saveStatusSheet');
+
+const debugLogSection = document.getElementById('debugLogSection');
+const debugLogEl = document.getElementById('debugLog');
+const copyDebugBtn = document.getElementById('copyDebugBtn');
+const debugModeCheckbox = document.getElementById('debugMode');
+const debugLogResizeHandle = document.getElementById('debugLogResizeHandle');
+
+let resizeStartY = 0;
+let resizeStartHeight = 0;
+
+function onDebugResizeMove(e) {
+  var newHeight = Math.max(30, resizeStartHeight + (e.clientY - resizeStartY));
+  debugLogEl.style.height = newHeight + 'px';
+}
+
+function onDebugResizeEnd() {
+  document.removeEventListener('mousemove', onDebugResizeMove);
+  document.removeEventListener('mouseup', onDebugResizeEnd);
+}
+
+debugLogResizeHandle.addEventListener('mousedown', function(e){
+  resizeStartY = e.clientY;
+  resizeStartHeight = debugLogEl.offsetHeight;
+  document.addEventListener('mousemove', onDebugResizeMove);
+  document.addEventListener('mouseup', onDebugResizeEnd);
+  e.preventDefault();
+});
+
+let settingsLoaded = false;
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = kind || '';
+}
+
+function setThreadsStatus(msg, kind) {
+  threadsStatusEl.textContent = msg;
+  threadsStatusEl.className = kind || '';
+}
+
+function setSaveStatus(el, msg, kind) {
+  el.textContent = msg;
+  el.className = 'saveStatus' + (kind ? ' ' + kind : '');
+}
+
+// Fills the copyable debug field with the latest run's log. Visibility
+// of the box itself is handled separately, by the checkbox - see
+// updateDebugLogVisibility() - so this only ever touches its content.
+function setDebugLog(text) {
+  debugLogEl.value = text || '';
+}
+
+// Shows/hides the debug box the moment the checkbox is ticked/unticked -
+// live, without waiting on a fetch or a save.
+function updateDebugLogVisibility() {
+  debugLogSection.style.display = debugModeCheckbox.checked ? 'block' : 'none';
+}
+
+debugModeCheckbox.addEventListener('change', updateDebugLogVisibility);
+
+copyDebugBtn.addEventListener('click', function(){
+  debugLogEl.select();
+  document.execCommand('copy');
+  copyDebugBtn.textContent = 'Copied!';
+  setTimeout(function(){ copyDebugBtn.textContent = 'Copy'; }, 1200);
+});
+
+function loadSettings() {
+
+  if (settingsLoaded) return;
+
+  google.script.run
+    .withSuccessHandler(function(cfg){
+
+      document.getElementById('draftColumn').value = cfg.draftColumn;
+      document.getElementById('team1Column').value = cfg.team1Column;
+      document.getElementById('team2Column').value = cfg.team2Column;
+      document.getElementById('roundColumn').value = cfg.roundColumn;
+      document.getElementById('matchIdColumn').value = cfg.matchIdColumn;
+      document.getElementById('winnerColumn').value = cfg.winnerColumn;
+      document.getElementById('matchLengthColumn').value = cfg.matchLengthColumn;
+      document.getElementById('picksStartColumn').value = cfg.picksStartColumn;
+      document.getElementById('pickBanOrder').value = cfg.pickBanOrder;
+      document.getElementById('discordGuildId').value = cfg.discordGuildId;
+      document.getElementById('discordMatchesForumChannelId').value = cfg.discordMatchesForumChannelId;
+      document.getElementById('matchThreadMessageTemplate').value = cfg.matchThreadMessageTemplate;
+      document.getElementById('debugMode').checked = cfg.debugMode;
+      updateDebugLogVisibility();
+
+      settingsLoaded = true;
+      validateInputs();
+
+    })
+    .withFailureHandler(function(err){
+      setSaveStatus(saveStatusBotEl, err.message, 'error');
+      setSaveStatus(saveStatusSheetEl, err.message, 'error');
+    })
+    .getSidebarConfig();
+
+}
+
+function makeSettingsToggle(toggleBtn, panel, label) {
+  toggleBtn.addEventListener('click', function(){
+
+    if (panel.style.display === 'block') {
+
+      panel.style.display = 'none';
+      toggleBtn.textContent = '▼ ' + label;
+
+    } else {
+
+      panel.style.display = 'block';
+      toggleBtn.textContent = '▲ ' + label;
+
+      loadSettings();
+
+    }
+
+  });
+}
+
+makeSettingsToggle(botSettingsToggle, botSettingsPanel, 'Bot Settings');
+makeSettingsToggle(sheetSettingsToggle, sheetSettingsPanel, 'Spreadsheet Settings');
+
+fetchBtn.addEventListener('click', function(){
+
+  fetchBtn.disabled = true;
+
+  setStatus(
+    'Fetching drafts and matches (this can take a little while for large sheets)...',
+    ''
+  );
+
+  google.script.run
+    .withSuccessHandler(function(result){
+
+      setStatus(result.summary, 'ok');
+      setDebugLog(result.debugLog);
+      fetchBtn.disabled = false;
+
+    })
+    .withFailureHandler(function(err){
+
+      setStatus(err.message, 'error');
+      fetchBtn.disabled = false;
+
+    })
+    .fetchDraftData();
+
+});
+
+createThreadsBtn.addEventListener('click', function(){
+
+  createThreadsBtn.disabled = true;
+
+  setThreadsStatus('Creating match threads...', '');
+
+  google.script.run
+    .withSuccessHandler(function(result){
+
+      setThreadsStatus(result.summary, 'ok');
+      setDebugLog(result.debugLog);
+      createThreadsBtn.disabled = false;
+
+    })
+    .withFailureHandler(function(err){
+
+      setThreadsStatus(err.message, 'error');
+      createThreadsBtn.disabled = false;
+
+    })
+    .createMatchThreads();
+
+});
+
+function validateInputs(){
+
+  const columnFields = document.querySelectorAll('.columnField');
+
+  columnFields.forEach(function(field){
+
+    field.value = field.value.toUpperCase();
+
+    if (/^[A-Z]{1,3}$/.test(field.value)) {
+      field.classList.remove('invalid');
+    } else {
+      field.classList.add('invalid');
+    }
+
+  });
+
+  const numericFields = document.querySelectorAll('input.numericField');
+
+  numericFields.forEach(function(field){
+
+    if (field.value.trim() === '' || /^\d{5,25}$/.test(field.value.trim())) {
+      field.classList.remove('invalid');
+    } else {
+      field.classList.add('invalid');
+    }
+
+  });
+
+}
+
+document.querySelectorAll('.columnField, .numericField').forEach(function(field){
+
+  field.addEventListener('input', validateInputs);
+
+});
+
+// Shared by both Settings panels' Save buttons - see the header comment
+// for why this always submits every field, not just the panel it was
+// clicked from.
+function saveAllSettings(triggerBtn, statusEl){
+
+  validateInputs();
+
+  if (document.querySelector('.invalid')) {
+
+    setSaveStatus(
+      statusEl,
+      'One or more fields are invalid - check column letters and Discord IDs.',
+      'error'
+    );
+
+    return;
+
+  }
+
+  triggerBtn.disabled = true;
+
+  setSaveStatus(statusEl, 'Saving...', '');
+
+  const config = {
+
+    draftColumn: document.getElementById('draftColumn').value,
+
+    team1Column: document.getElementById('team1Column').value,
+
+    team2Column: document.getElementById('team2Column').value,
+
+    roundColumn: document.getElementById('roundColumn').value,
+
+    matchIdColumn: document.getElementById('matchIdColumn').value,
+
+    winnerColumn: document.getElementById('winnerColumn').value,
+
+    matchLengthColumn: document.getElementById('matchLengthColumn').value,
+
+    picksStartColumn: document.getElementById('picksStartColumn').value,
+
+    pickBanOrder: document.getElementById('pickBanOrder').value,
+
+    discordGuildId: document.getElementById('discordGuildId').value,
+
+    discordMatchesForumChannelId: document.getElementById('discordMatchesForumChannelId').value,
+
+    matchThreadMessageTemplate: document.getElementById('matchThreadMessageTemplate').value,
+
+    debugMode: document.getElementById('debugMode').checked
+
+  };
+
+  google.script.run
+    .withSuccessHandler(function(message){
+
+      setSaveStatus(statusEl, message, 'ok');
+      triggerBtn.disabled = false;
+
+    })
+    .withFailureHandler(function(err){
+
+      setSaveStatus(statusEl, err.message, 'error');
+      triggerBtn.disabled = false;
+
+    })
+    .saveSidebarConfig(config);
+
+}
+
+saveBtnBot.addEventListener('click', function(){
+  saveAllSettings(saveBtnBot, saveStatusBotEl);
+});
+
+saveBtnSheet.addEventListener('click', function(){
+  saveAllSettings(saveBtnSheet, saveStatusSheetEl);
+});
+
+const completeEventBtn = document.getElementById('completeEventBtn');
+const completeEventStatusEl = document.getElementById('completeEventStatus');
+
+const completeEventModalOverlay = document.getElementById('completeEventModalOverlay');
+const completeEventNameInput = document.getElementById('completeEventNameInput');
+const completeEventCancelBtn = document.getElementById('completeEventCancelBtn');
+const completeEventConfirmBtn = document.getElementById('completeEventConfirmBtn');
+
+let completeEventDefaultName = '';
+
+function setCompleteEventStatus(html, kind) {
+  completeEventStatusEl.innerHTML = html;
+  completeEventStatusEl.className = kind || '';
+}
+
+function escapeHtml_(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function openCompleteEventModal() {
+
+  completeEventNameInput.value = completeEventDefaultName;
+  completeEventModalOverlay.classList.add('visible');
+
+  // Fetching the live default name is best-effort - if it's slow or
+  // fails, the field just keeps whatever it already had (blank on the
+  // very first open, which still works fine server-side).
+  google.script.run
+    .withSuccessHandler(function(name){
+      completeEventDefaultName = name;
+      if (!completeEventNameInput.value) {
+        completeEventNameInput.value = name;
+      }
+    })
+    .withFailureHandler(function(){})
+    .getCompleteEventDefaultName();
+
+  completeEventNameInput.focus();
+  completeEventNameInput.select();
+
+}
+
+function closeCompleteEventModal() {
+  completeEventModalOverlay.classList.remove('visible');
+}
+
+completeEventBtn.addEventListener('click', openCompleteEventModal);
+
+completeEventCancelBtn.addEventListener('click', closeCompleteEventModal);
+
+completeEventModalOverlay.addEventListener('click', function(e){
+  if (e.target === completeEventModalOverlay) closeCompleteEventModal();
+});
+
+completeEventConfirmBtn.addEventListener('click', function(){
+
+  var eventName = completeEventNameInput.value.trim();
+
+  closeCompleteEventModal();
+
+  completeEventBtn.disabled = true;
+  setCompleteEventStatus('Completing event...', '');
+
+  google.script.run
+    .withSuccessHandler(function(result){
+
+      setCompleteEventStatus(
+        'Copied ' + result.tabsCopied + ' tab(s) into <a href="' + result.url +
+        '" target="_blank" rel="noopener">' + escapeHtml_(result.name) + '</a>.',
+        'ok'
+      );
+      completeEventBtn.disabled = false;
+
+    })
+    .withFailureHandler(function(err){
+
+      setCompleteEventStatus(escapeHtml_(err.message), 'error');
+      completeEventBtn.disabled = false;
+
+    })
+    .completeMyEventFromSidebar(eventName);
+
+});
+
+window.onload = loadSettings;
+
+</script>
+
+</body>
+</html>

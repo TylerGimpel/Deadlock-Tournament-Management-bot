@@ -1,0 +1,18 @@
+{
+  "name": "deadlock-tournament-management-bot",
+  "private": true,
+  "version": "1.1.0",
+  "license": "MIT",
+  "author": "pulse_ks",
+  "scripts": {
+    "setup": "node setup.js",
+    "upgrade": "node upgrade.js",
+    "upgrade-sheet": "node upgrade-sheet.js",
+    "upgrade-all": "node upgrade.js && node upgrade-sheet.js",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.15.2",
+    "@google/clasp": "^3.3.0"
+  }
+}

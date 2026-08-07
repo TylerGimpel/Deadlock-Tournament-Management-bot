@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Patched automatically by setup.js when you answer "Worker name" -
+  // leave this default in place, it'll be overwritten.
+  "name": "deadlock-tournament-management-bot",
+
+  "main": "worker.js",
+  "compatibility_date": "2026-07-22",
+
+  // The Worker's memory (see Installation Guide Part C / worker.js's
+  // header comment). No "id" on purpose - Wrangler auto-provisions the
+  // namespace on first `wrangler deploy` and reuses it on every deploy
+  // after that, as long as this binding name and the Worker name above
+  // don't change.
+  "kv_namespaces": [
+    {
+      "binding": "MATCH_STATE"
+    }
+  ],
+
+  // Plain (non-secret) config. setup.js patches these four in place -
+  // the empty strings must stay here as real values, not be deleted,
+  // or its regex replace has nothing to match and silently no-ops.
+  // DISCORD_BOT_TOKEN, DISCORD_PUBLIC_KEY, RELAY_SECRET,
+  // STATLOCKER_API_KEY, SHEET_WEBHOOK_URL and SHEET_WEBHOOK_SECRET are
+  // NOT here - setup.js sets those as real Worker secrets via
+  // `wrangler secret put`, not as plain vars.
+  "vars": {
+    "MODERATOR_ROLE_IDS": "",
+    "SIDE_A_EMOJI_ID": "",
+    "SIDE_A_EMOJI_NAME": "",
+    "SIDE_B_EMOJI_ID": "",
+    "SIDE_B_EMOJI_NAME": ""
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,767 @@
+<!--
+  Bot version: 20260724.2
+  =====================================================================
+  SetupWizard.html - Deadlock Tournament Management Bot Setup Wizard
+  =====================================================================
+  A step-by-step alternative to doing Code.gs's INSTALL steps 5-7 by
+  hand. Opened via Deadlock Tournament Management Bot > Setup Wizard (see Code.gs's
+  showSetupWizard), or automatically once on an unconfigured copy (see
+  maybeAutoLaunchWizard_).
+
+  Every step's Save/Next calls straight into the same Script/Document
+  Properties the rest of the project already reads - see each step's
+  google.script.run call and the matching Code.gs function's JSDoc for
+  exactly what it touches. Every step that needs information you might
+  not have yet (an API key, a URL, an ID) has a Skip link that moves on
+  without saving anything for that step, so nobody gets stuck - you can
+  always come back via Deadlock Tournament Management Bot > Setup Wizard later, and the
+  Diagnostics step (the last one) always shows the true state of
+  everything, skipped or not.
+  =====================================================================
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      color: #202124;
+      padding: 4px 6px 10px;
+    }
+
+    h2 {
+      margin: 2px 0 4px;
+      font-size: 17px;
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      color: #5f6368;
+      font-weight: normal;
+    }
+
+    p {
+      line-height: 1.5;
+      margin: 0 0 10px;
+    }
+
+    code {
+      background: #f1f3f4;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: "Courier New", monospace;
+    }
+
+    /* --- progress dots --- */
+    #progress {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 18px;
+    }
+
+    .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #e8eaed;
+      color: #5f6368;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .dot.current {
+      background: #4a8be8;
+      color: white;
+    }
+
+    .dot.done {
+      background: #188038;
+      color: white;
+    }
+
+    .dot.skipped {
+      background: #f9ab00;
+      color: white;
+    }
+
+    .dotline {
+      flex: 1;
+      height: 2px;
+      background: #e8eaed;
+    }
+
+    /* --- steps --- */
+    .step {
+      display: none;
+    }
+
+    .step.active {
+      display: block;
+    }
+
+    .infoBox {
+      font-size: 12px;
+      color: #5f6368;
+      margin-bottom: 12px;
+      padding: 8px 10px;
+      background: #f1f3f4;
+      border-radius: 4px;
+      line-height: 1.5;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: bold;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 8px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: "Courier New", monospace;
+    }
+
+    input.invalid {
+      border-color: #d93025;
+      background: #fce8e6;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #5f6368;
+      margin-top: 3px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 20px;
+      align-items: center;
+    }
+
+    button {
+      padding: 9px 16px;
+      border: none;
+      border-radius: 4px;
+      background: #4a8be8;
+      color: white;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: white;
+      color: #4a8be8;
+      border: 1px solid #4a8be8;
+    }
+
+    button.link {
+      background: none;
+      color: #5f6368;
+      padding: 9px 4px;
+      text-decoration: underline;
+    }
+
+    button:disabled {
+      background: #9aa0a6;
+      border-color: #9aa0a6;
+      color: white;
+      cursor: default;
+    }
+
+    .spacer {
+      flex: 1;
+    }
+
+    [id^="stepStatus"] {
+      margin-top: 10px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+
+    [id^="stepStatus"].ok { color: #188038; }
+    [id^="stepStatus"].error { color: #c5221f; font-weight: bold; }
+    [id^="stepStatus"].pending { color: #5f6368; }
+
+    .copyField {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .copyField input {
+      flex: 1;
+    }
+
+    .copyField button {
+      width: auto;
+      padding: 7px 12px;
+      font-size: 12px;
+    }
+
+    .checkboxRow {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 14px 0 4px;
+      font-size: 12px;
+    }
+
+    /* --- diagnostics list --- */
+    .diagItem {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid #f1f3f4;
+    }
+
+    .diagIcon {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 11px;
+      margin-top: 1px;
+    }
+
+    .diagIcon.ok { background: #188038; }
+    .diagIcon.bad { background: #c5221f; }
+    .diagIcon.unknown { background: #9aa0a6; }
+
+    .diagLabel {
+      font-weight: bold;
+    }
+
+    .diagDetail {
+      font-size: 12px;
+      color: #5f6368;
+      margin-top: 2px;
+    }
+
+    .diagJump {
+      background: none;
+      color: #4a8be8;
+      text-decoration: underline;
+      padding: 0;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+  </style>
+</head>
+
+<body>
+
+<div id="progress"></div>
+
+<!-- Step 0: Welcome -->
+<div class="step" data-step="0">
+  <h2>Deadlock Tournament Management Bot Setup Wizard</h2>
+  <h3>Fills in this spreadsheet's side of the install guide's Part 2.</h3>
+  <p>This walks through everything under Extensions &gt; Apps Script &gt; Project Settings &gt; Script Properties, plus deploying this project as a Web App - the same things Part 2 of the install guide has you do by hand, just with inline validation and live connection tests.</p>
+  <p>If you don't have a piece of information yet (an API key, a Worker URL), every step has a <strong>Skip</strong> link - nothing here can get you stuck. You can always reopen this from <strong>Deadlock Tournament Management Bot &gt; Setup Wizard</strong> later to pick up where you left off.</p>
+  <div class="infoBox">Before you start, Part 1 of the install guide (the Discord bot) should be done, and Part 2's installer should already be running, paused, and waiting for two values this wizard will generate for you. If you haven't started that yet, go do that first - it'll send you here at the right moment.</div>
+  <div class="row">
+    <span class="spacer"></span>
+    <button data-next>Get started</button>
+  </div>
+</div>
+
+<!-- Step 1: Statlocker API key -->
+<div class="step" data-step="1">
+  <h2>Statlocker API key</h2>
+  <h3>Guide step 2.3 - STATLOCKER_API_KEY</h3>
+  <label for="statlockerKey">API key</label>
+  <input id="statlockerKey" type="password" placeholder="sk_...">
+  <div class="hint">The same key you used in step 2.1 (the Worker installer) - looks like sk_ followed by 64 letters/numbers.</div>
+  <div id="stepStatus1" class="pending"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <button class="secondary" data-test="1">Test key</button>
+    <span class="spacer"></span>
+    <button class="link" data-skip>Skip for now</button>
+    <button data-save-next="1">Save &amp; Next</button>
+  </div>
+</div>
+
+<!-- Step 2: Deploy the web app -->
+<div class="step" data-step="2">
+  <h2>Deploy the Web App</h2>
+  <h3>Guide step 2.3</h3>
+  <p>This one step has to be done by hand - a script can't authorize its own first deployment. Open the Apps Script editor (this stays open in its own tab, so you can switch back here without losing your place):</p>
+  <div class="row" style="margin-bottom:10px;">
+    <span class="spacer"></span>
+    <a id="openEditorLink" href="#" target="_blank" style="text-decoration:none;">
+      <button type="button" class="secondary">Open the Apps Script editor &#8599;</button>
+    </a>
+  </div>
+  <ol style="margin:0 0 10px; padding-left:20px; line-height:1.6;">
+    <li>Click <strong>Deploy</strong> (top right) → <strong>New deployment</strong>.</li>
+    <li>Gear icon next to "Select type" → <strong>Web app</strong>.</li>
+    <li>Execute as <strong>Me</strong>, Who has access <strong>Anyone</strong>.</li>
+    <li>Click <strong>Deploy</strong>, authorize if asked.</li>
+  </ol>
+  <p class="hint">Once that's deployed, this sheet can read its own Web app URL back from Apps Script - click Auto-detect rather than copy-pasting it by hand.</p>
+  <label for="webAppUrl">Web app URL</label>
+  <input id="webAppUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec">
+  <div id="stepStatus2" class="pending"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <button class="secondary" data-detect="2">Auto-detect</button>
+    <button class="secondary" data-test="2">Verify</button>
+    <span class="spacer"></span>
+    <button class="link" data-skip>Skip for now</button>
+    <button data-save-next="2">Next</button>
+  </div>
+</div>
+
+<!-- Step 3: Connect Cloudflare -->
+<div class="step" data-step="3">
+  <h2>Connect Cloudflare</h2>
+  <h3>Guide steps 2.3 &amp; 2.6</h3>
+  <p>Your Worker needs to know these two values as Secrets named SHEET_WEBHOOK_URL and SHEET_WEBHOOK_SECRET. The secret is generated automatically below - no need to invent one. If you're using the installer, don't click Next yet - copy all three values below, switch to install guide step 2.4 to give them to the installer, and come back here afterward to check the box and continue. If you set up the Worker by hand instead, add the first two now: Worker → Settings → Variables and Secrets → add each one as a <strong>Secret</strong>, then check the box and continue.</p>
+  <label>SHEET_WEBHOOK_URL</label>
+  <div class="copyField">
+    <input id="webhookUrlDisplay" type="text" readonly>
+    <button data-copy="webhookUrlDisplay">Copy</button>
+  </div>
+  <label>SHEET_WEBHOOK_SECRET</label>
+  <div class="copyField">
+    <input id="webhookSecretDisplay" type="text" readonly>
+    <button data-copy="webhookSecretDisplay">Copy</button>
+  </div>
+  <label>Script ID</label>
+  <div class="copyField">
+    <input id="scriptIdDisplay" type="text" readonly>
+    <button data-copy="scriptIdDisplay">Copy</button>
+  </div>
+  <p style="margin-top:-8px; font-size:0.9em; color:#666;">The installer doesn't need this to set up Cloudflare - paste it in anyway when asked. It saves you looking it up again if you ever run the upgrade tool later.</p>
+  <div class="checkboxRow">
+    <input id="cloudflareConfirmCheck" type="checkbox">
+    <label for="cloudflareConfirmCheck" style="margin:0; font-weight:normal;">I've added both of these to Cloudflare and saved.</label>
+  </div>
+  <div id="stepStatus3" class="pending"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <span class="spacer"></span>
+    <button class="link" data-skip>Skip for now</button>
+    <button data-save-next="3">Next</button>
+  </div>
+</div>
+
+<!-- Step 4: Discord relay connection -->
+<div class="step" data-step="4">
+  <h2>Discord relay connection</h2>
+  <h3>Guide step 2.6 - DISCORD_RELAY_URL &amp; DISCORD_RELAY_SECRET</h3>
+  <label for="relayUrl">Worker URL</label>
+  <input id="relayUrl" type="text" placeholder="https://deadlock-tournament-management-bot.your-subdomain.workers.dev">
+  <div class="hint">From step 2.1 (the installer's own printout) - just the base address, without /interactions on the end.</div>
+  <label for="relaySecret">RELAY_SECRET</label>
+  <input id="relaySecret" type="password" placeholder="paste the value the installer printed in step 2.1">
+  <div class="hint">The exact same value the installer generated and set on the Worker in step 2.1.</div>
+  <div id="stepStatus4" class="pending"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <button class="secondary" data-test="4">Test connection</button>
+    <span class="spacer"></span>
+    <button class="link" data-skip>Skip for now</button>
+    <button data-save-next="4">Save &amp; Next</button>
+  </div>
+</div>
+
+<!-- Step 5: Discord IDs & sheet layout -->
+<div class="step" data-step="5">
+  <h2>Discord IDs &amp; sheet layout</h2>
+  <h3>Guide step 2.6 (Part 1.3)</h3>
+  <label for="discordGuildId">Discord Server ID</label>
+  <input id="discordGuildId" type="text" class="numericField" placeholder="all digits">
+  <label for="discordMatchesForumChannelId">Matches Forum Channel ID</label>
+  <input id="discordMatchesForumChannelId" type="text" class="numericField" placeholder="all digits">
+  <div class="hint">Both from Part 1.3. The message template stays in the Bot Settings panel, and column layout stays in the Spreadsheet Settings panel (both under Deadlock Tournament Management Bot &gt; Open Sidebar) - see Part 3 of the install guide; the defaults there already match the template.</div>
+  <div id="stepStatus5" class="pending"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <span class="spacer"></span>
+    <button class="link" data-skip>Skip for now</button>
+    <button data-save-next="5">Save &amp; Next</button>
+  </div>
+</div>
+
+<!-- Step 6: Diagnostics -->
+<div class="step" data-step="6">
+  <h2>Diagnostics</h2>
+  <h3>Live check of everything above</h3>
+  <div id="diagList"></div>
+  <div id="diagSummary" class="infoBox"></div>
+  <div class="row">
+    <button class="link" data-back>&larr; Back</button>
+    <button class="secondary" data-rerun-diag>Re-run diagnostics</button>
+    <span class="spacer"></span>
+    <button data-finish>Finish</button>
+  </div>
+</div>
+
+<script>
+
+var STEP_COUNT = 7; // 0-6
+var currentStep = 0;
+var wizardState = null;
+
+function el(id) { return document.getElementById(id); }
+
+function renderProgress() {
+  var container = el('progress');
+  var isNumberedStep = (typeof currentStep === 'number');
+  container.style.display = isNumberedStep ? 'flex' : 'none';
+  if (!isNumberedStep) return;
+  container.innerHTML = '';
+  for (var i = 0; i < STEP_COUNT; i++) {
+    var dot = document.createElement('div');
+    dot.className = 'dot' + (i === currentStep ? ' current' : (i < currentStep ? ' done' : ''));
+    dot.textContent = (i === 0) ? '•' : i;
+    container.appendChild(dot);
+    if (i < STEP_COUNT - 1) {
+      var line = document.createElement('div');
+      line.className = 'dotline';
+      container.appendChild(line);
+    }
+  }
+}
+
+function showStep(n) {
+  currentStep = n;
+  document.querySelectorAll('.step').forEach(function (s) {
+    s.classList.toggle('active', s.getAttribute('data-step') === String(n));
+  });
+  renderProgress();
+  if (n === 3) loadCloudflareStep();
+  if (n === 6) runDiagnostics();
+}
+
+function setStepStatus(stepNum, msg, kind) {
+  var elm = el('stepStatus' + stepNum);
+  if (!elm) return;
+  elm.textContent = msg;
+  elm.className = kind || 'pending';
+}
+
+document.querySelectorAll('[data-next]').forEach(function (btn) {
+  btn.addEventListener('click', function () { showStep(currentStep + 1); });
+});
+
+document.querySelectorAll('[data-back]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    showStep(typeof currentStep === 'number' ? Math.max(0, currentStep - 1) : 0);
+  });
+});
+
+document.querySelectorAll('[data-skip]').forEach(function (btn) {
+  btn.addEventListener('click', function () { showStep(currentStep + 1); });
+});
+
+document.querySelectorAll('[data-copy]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var target = el(btn.getAttribute('data-copy'));
+    target.select();
+    document.execCommand('copy');
+    var original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(function () { btn.textContent = original; }, 1200);
+  });
+});
+
+// --- Step 1: Statlocker key ---
+
+el('statlockerKey').addEventListener('input', function () { setStepStatus(1, '', 'pending'); });
+
+document.querySelector('[data-test="1"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var key = el('statlockerKey').value.trim();
+  btn.disabled = true;
+  setStepStatus(1, 'Testing...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (msg) { setStepStatus(1, msg, 'ok'); btn.disabled = false; })
+    .withFailureHandler(function (err) { setStepStatus(1, err.message, 'error'); btn.disabled = false; })
+    .testStatlockerApiKey(key);
+});
+
+document.querySelector('[data-save-next="1"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var key = el('statlockerKey').value.trim();
+  if (!key && wizardState && wizardState.statlockerApiKeySet) {
+    // Blank means "keep the existing key" per the placeholder text -
+    // nothing changed, so there's nothing to save.
+    showStep(2);
+    return;
+  }
+  btn.disabled = true;
+  setStepStatus(1, 'Saving...', 'pending');
+  google.script.run
+    .withSuccessHandler(function () { btn.disabled = false; showStep(2); })
+    .withFailureHandler(function (err) { setStepStatus(1, err.message, 'error'); btn.disabled = false; })
+    .saveStatlockerApiKey(key);
+});
+
+// --- Step 2: deploy web app ---
+
+el('webAppUrl').addEventListener('input', function () { setStepStatus(2, '', 'pending'); });
+
+document.querySelector('[data-detect="2"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  btn.disabled = true;
+  setStepStatus(2, 'Looking for a deployment...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (result) {
+      el('webAppUrl').value = result.url;
+      setStepStatus(2, result.message, 'ok');
+      btn.disabled = false;
+    })
+    .withFailureHandler(function (err) { setStepStatus(2, err.message, 'error'); btn.disabled = false; })
+    .detectWebAppUrl();
+});
+
+document.querySelector('[data-test="2"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var url = el('webAppUrl').value.trim();
+  btn.disabled = true;
+  setStepStatus(2, 'Verifying...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (msg) { setStepStatus(2, msg, 'ok'); btn.disabled = false; })
+    .withFailureHandler(function (err) { setStepStatus(2, err.message, 'error'); btn.disabled = false; })
+    .verifyWebAppUrl(url);
+});
+
+document.querySelector('[data-save-next="2"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var url = el('webAppUrl').value.trim();
+  if (!url) { showStep(3); return; }
+  btn.disabled = true;
+  setStepStatus(2, 'Verifying...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (msg) {
+      setStepStatus(2, msg, 'ok');
+      btn.disabled = false;
+      showStep(3);
+    })
+    .withFailureHandler(function (err) { setStepStatus(2, err.message, 'error'); btn.disabled = false; })
+    .verifyWebAppUrl(url);
+});
+
+// --- Step 3: connect Cloudflare (also generates the webhook secret) ---
+
+function loadCloudflareStep() {
+  google.script.run
+    .withSuccessHandler(function (state) {
+      el('webhookUrlDisplay').value = state.sheetWebAppUrl || '(deploy the Web App in the previous step first)';
+      el('cloudflareConfirmCheck').checked = state.cloudflareConfirmed;
+    })
+    .withFailureHandler(function (err) { setStepStatus(3, err.message, 'error'); })
+    .getWizardState();
+
+  setStepStatus(3, 'Generating webhook secret...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (result) {
+      el('webhookSecretDisplay').value = result.value;
+      setStepStatus(3, result.generated ? 'Generated and saved.' : 'Already generated on an earlier visit - reusing the same value.', 'ok');
+    })
+    .withFailureHandler(function (err) { setStepStatus(3, err.message, 'error'); })
+    .ensureSheetWebhookSecret();
+}
+
+document.querySelector('[data-save-next="3"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  if (!el('cloudflareConfirmCheck').checked) { showStep(4); return; }
+  btn.disabled = true;
+  google.script.run
+    .withSuccessHandler(function () { btn.disabled = false; showStep(4); })
+    .withFailureHandler(function (err) { setStepStatus(3, err.message, 'error'); btn.disabled = false; })
+    .markCloudflareConfirmed();
+});
+
+// --- Step 4: Discord relay ---
+
+['relayUrl', 'relaySecret'].forEach(function (id) {
+  el(id).addEventListener('input', function () { setStepStatus(4, '', 'pending'); });
+});
+
+document.querySelector('[data-test="4"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var url = el('relayUrl').value.trim();
+  var secret = el('relaySecret').value.trim();
+  btn.disabled = true;
+  setStepStatus(4, 'Testing connection...', 'pending');
+  google.script.run
+    .withSuccessHandler(function (result) { setStepStatus(4, result.summary, 'ok'); btn.disabled = false; })
+    .withFailureHandler(function (err) { setStepStatus(4, err.message, 'error'); btn.disabled = false; })
+    .testDiscordRelayConnection(url, secret);
+});
+
+document.querySelector('[data-save-next="4"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var url = el('relayUrl').value.trim();
+  var secret = el('relaySecret').value.trim();
+  btn.disabled = true;
+  setStepStatus(4, 'Saving...', 'pending');
+  google.script.run
+    .withSuccessHandler(function () { btn.disabled = false; showStep(5); })
+    .withFailureHandler(function (err) { setStepStatus(4, err.message, 'error'); btn.disabled = false; })
+    .saveDiscordRelayConfig(url, secret);
+});
+
+// --- Step 6: Discord IDs ---
+
+function validateSnowflakeField(field) {
+  var v = field.value.trim();
+  if (v === '' || /^\d{5,25}$/.test(v)) {
+    field.classList.remove('invalid');
+    return true;
+  }
+  field.classList.add('invalid');
+  return false;
+}
+
+['discordGuildId', 'discordMatchesForumChannelId'].forEach(function (id) {
+  el(id).addEventListener('input', function () { validateSnowflakeField(el(id)); });
+});
+
+document.querySelector('[data-save-next="5"]').addEventListener('click', function (e) {
+  var btn = e.target;
+  var guildOk = validateSnowflakeField(el('discordGuildId'));
+  var channelOk = validateSnowflakeField(el('discordMatchesForumChannelId'));
+  if (!guildOk || !channelOk) {
+    setStepStatus(5, 'These should be all digits - right-click the server icon / forum channel in Discord and "Copy ID" (Developer Mode must be on).', 'error');
+    return;
+  }
+  btn.disabled = true;
+  setStepStatus(5, 'Saving...', 'pending');
+  // Reuses the same saveSidebarConfig the regular Settings panel uses -
+  // fetch the rest of its current config first so we don't clobber
+  // column layout / message template with wizard defaults.
+  google.script.run
+    .withSuccessHandler(function (currentCfg) {
+      currentCfg.discordGuildId = el('discordGuildId').value.trim();
+      currentCfg.discordMatchesForumChannelId = el('discordMatchesForumChannelId').value.trim();
+      google.script.run
+        .withSuccessHandler(function () { btn.disabled = false; showStep(6); })
+        .withFailureHandler(function (err) { setStepStatus(5, err.message, 'error'); btn.disabled = false; })
+        .saveSidebarConfig(currentCfg);
+    })
+    .withFailureHandler(function (err) { setStepStatus(5, err.message, 'error'); btn.disabled = false; })
+    .getSidebarConfig();
+});
+
+// --- Step 6: diagnostics ---
+
+var STEP_FOR_DIAG_ID = {
+  statlocker: 1,
+  webhookSecret: 3,
+  webApp: 2,
+  relay: 4,
+  discordIds: 5
+};
+
+function renderDiagnostics(result) {
+  var list = el('diagList');
+  list.innerHTML = '';
+  result.items.forEach(function (item) {
+    var row = document.createElement('div');
+    row.className = 'diagItem';
+
+    var icon = document.createElement('div');
+    icon.className = 'diagIcon ' + (item.ok === true ? 'ok' : (item.ok === false ? 'bad' : 'unknown'));
+    icon.textContent = item.ok === true ? '✓' : (item.ok === false ? '!' : '?');
+
+    var body = document.createElement('div');
+    var label = document.createElement('div');
+    label.className = 'diagLabel';
+    label.textContent = item.label;
+    var detail = document.createElement('div');
+    detail.className = 'diagDetail';
+    detail.textContent = item.detail;
+    body.appendChild(label);
+    body.appendChild(detail);
+
+    if (item.ok !== true && STEP_FOR_DIAG_ID[item.id] !== undefined) {
+      var jump = document.createElement('button');
+      jump.className = 'diagJump';
+      jump.textContent = 'Fix this step →';
+      jump.addEventListener('click', function () { showStep(STEP_FOR_DIAG_ID[item.id]); });
+      body.appendChild(jump);
+    }
+
+    row.appendChild(icon);
+    row.appendChild(body);
+    list.appendChild(row);
+  });
+
+  el('diagSummary').textContent = result.allOk
+    ? 'Everything checks out - try Part 4 of the install guide (creating a test match thread) next.'
+    : 'Some things still need attention - use "Fix this step" next to any item above, or Skip is fine for anything you\'re not ready for yet.';
+}
+
+function runDiagnostics() {
+  el('diagList').innerHTML = '<p class="hint">Running checks...</p>';
+  el('diagSummary').textContent = '';
+  google.script.run
+    .withSuccessHandler(renderDiagnostics)
+    .withFailureHandler(function (err) {
+      el('diagList').innerHTML = '';
+      el('diagSummary').textContent = err.message;
+    })
+    .runWizardDiagnostics();
+}
+
+document.querySelector('[data-rerun-diag]').addEventListener('click', runDiagnostics);
+document.querySelector('[data-finish]').addEventListener('click', function () {
+  google.script.host.close();
+});
+
+// --- initial load: prefill anything already saved ---
+
+function init() {
+  google.script.run
+    .withSuccessHandler(function (state) {
+      wizardState = state;
+      if (state.statlockerApiKeySet) {
+        el('statlockerKey').placeholder = 'already set (' + state.statlockerApiKeyMasked + ') - leave blank to keep it';
+      }
+      if (state.discordRelayUrl) el('relayUrl').value = state.discordRelayUrl;
+      if (state.sheetWebAppUrl) el('webAppUrl').value = state.sheetWebAppUrl;
+      el('discordGuildId').value = state.discordGuildId || '';
+      el('discordMatchesForumChannelId').value = state.discordMatchesForumChannelId || '';
+      el('scriptIdDisplay').value = state.scriptId || '(unavailable)';
+      if (state.scriptId) {
+        el('openEditorLink').href = 'https://script.google.com/home/projects/' + state.scriptId + '/edit';
+      }
+    })
+    .withFailureHandler(function () { /* non-fatal - wizard still usable blank */ })
+    .getWizardState();
+
+  showStep(0);
+}
+
+init();
+
+</script>
+
+</body>
+</html>
