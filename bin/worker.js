@@ -1,4 +1,4 @@
-// Bot version: 20260807.1
+// Bot version: 20260807.5
 /**
  * =====================================================================
  * Discord API Relay + Interactions - Cloudflare Worker
@@ -1679,9 +1679,24 @@ async function createStatlockerDraft_(amberName, sapphireName, env) {
  *   called (e.g. { hiddenKingTeam }, { draftUrl }, { action: 'matchComplete' })
  * @return {Object} parsed JSON response body
  */
-/** HMAC-SHA256(secret, "action:row:sheetName:timestamp") - must match Code.gs's computeWebhookSignature_. */
-function computeWebhookSignature_(secret, action, row, sheetName, timestamp) {
-  return hmacHex_(secret, `${action}:${row}:${sheetName}:${timestamp}`);
+/**
+ * Builds a stable, order-independent string of every payload field
+ * (except "signature") for HMAC signing - "key=JSON.stringify(value)"
+ * pairs sorted by key and joined with "&", so the signature covers the
+ * whole body instead of a fixed field subset. Must match Code.gs's
+ * canonicalizePayload_.
+ */
+function canonicalizePayload_(payload) {
+  return Object.keys(payload)
+    .filter((key) => key !== "signature")
+    .sort()
+    .map((key) => `${key}=${JSON.stringify(payload[key])}`)
+    .join("&");
+}
+
+/** HMAC-SHA256(secret, canonicalized payload) - must match Code.gs's computeWebhookSignature_. */
+function computeWebhookSignature_(secret, payload) {
+  return hmacHex_(secret, canonicalizePayload_(payload));
 }
 
 async function postToSheetWebhook_(row, sheetName, fields, env) {
@@ -1695,15 +1710,16 @@ async function postToSheetWebhook_(row, sheetName, fields, env) {
   // own execution log can capture doPost's incoming payload) isn't
   // enough on its own to forge future calls, and a captured request
   // can't be replayed past SIGNATURE_WINDOW_MS. See Code.gs's doPost
-  // for the matching verification.
-  const action = fields.action || "write";
+  // for the matching verification. The signature covers the entire
+  // body (via canonicalizePayload_), not just a fixed field subset.
   const timestamp = Date.now();
-  const signature = await computeWebhookSignature_(env.SHEET_WEBHOOK_SECRET, action, row, sheetName, timestamp);
+  const body = Object.assign({ timestamp, row, sheetName }, fields);
+  body.signature = await computeWebhookSignature_(env.SHEET_WEBHOOK_SECRET, body);
 
   const response = await fetch(env.SHEET_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(Object.assign({ timestamp, signature, row, sheetName }, fields))
+    body: JSON.stringify(body)
   });
 
   const text = await response.text();
@@ -1982,19 +1998,22 @@ async function hmacHex_(secret, message) {
   return bytesToHex_(new Uint8Array(signatureBuffer));
 }
 
-/** HMAC-SHA256(secret, "timestamp") - must match Code.gs's computeRelaySignature_. */
-function computeRelaySignature_(secret, timestamp) {
-  return hmacHex_(secret, String(timestamp));
+/** HMAC-SHA256(secret, "timestamp:nonce") - must match Code.gs's computeRelaySignature_. */
+function computeRelaySignature_(secret, timestamp, nonce) {
+  return hmacHex_(secret, `${timestamp}:${nonce}`);
 }
 
 /**
- * Verifies the X-Relay-Timestamp / X-Relay-Signature headers Code.gs
- * sends on every relay call (see its buildRelayAuthHeaders_) - an HMAC
- * over the timestamp, rather than RELAY_SECRET itself traveling as a
- * bare bearer token. The signature check is constant-time
- * (timingSafeEqual); the timestamp check on top of it is what actually
- * closes the replay hole a bare shared secret has - a captured request
- * is only valid for SIGNATURE_WINDOW_MS, not forever.
+ * Verifies the X-Relay-Timestamp / X-Relay-Nonce / X-Relay-Signature
+ * headers Code.gs sends on every relay call (see its
+ * buildRelayAuthHeaders_) - an HMAC over the timestamp+nonce, rather
+ * than RELAY_SECRET itself traveling as a bare bearer token. The
+ * signature check is constant-time (timingSafeEqual); the timestamp
+ * check bounds how long a captured request stays valid
+ * (SIGNATURE_WINDOW_MS), and the nonce check makes it one-time-use
+ * within that window - a captured valid request can't be resent even
+ * before it expires, since its nonce is recorded in KV the first time
+ * it's seen.
  * @param {Request} request
  * @param {Object} env
  * @return {Promise<boolean>}
@@ -2004,11 +2023,19 @@ async function verifyRelayRequest_(request, env) {
   if (!secret) return false;
 
   const timestamp = Number(request.headers.get("X-Relay-Timestamp") || "");
+  const nonce = request.headers.get("X-Relay-Nonce") || "";
   const signature = request.headers.get("X-Relay-Signature") || "";
   if (!timestamp || Math.abs(Date.now() - timestamp) > SIGNATURE_WINDOW_MS) return false;
+  if (!nonce) return false;
 
-  const expected = await computeRelaySignature_(secret, timestamp);
-  return timingSafeEqual(signature, expected);
+  const expected = await computeRelaySignature_(secret, timestamp, nonce);
+  if (!timingSafeEqual(signature, expected)) return false;
+
+  const nonceKey = "relay_nonce:" + nonce;
+  if (await env.MATCH_STATE.get(nonceKey)) return false;
+  await env.MATCH_STATE.put(nonceKey, "1", { expirationTtl: Math.ceil(SIGNATURE_WINDOW_MS / 1000) });
+
+  return true;
 }
 
 // Constant-time string comparison so the relay secret can't be guessed

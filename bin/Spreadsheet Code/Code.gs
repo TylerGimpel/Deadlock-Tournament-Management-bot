@@ -1,4 +1,4 @@
-// Bot version: 20260807.1
+// Bot version: 20260807.5
 /**
  * =====================================================================
  * Deadlock Tournament Management Bot for Google Sheets
@@ -540,28 +540,29 @@ function timingSafeEqual_(a, b) {
 // to replay shortly after. Shared by both signature directions below.
 var SIGNATURE_WINDOW_MS = 5 * 60 * 1000;
 
-/** HMAC-SHA256(secret, "timestamp") - must match worker.js's verifyRelaySignature_. */
-function computeRelaySignature_(secret, timestamp) {
-  return hmacHex_(secret, String(timestamp));
+/** HMAC-SHA256(secret, "timestamp:nonce") - must match worker.js's computeRelaySignature_. */
+function computeRelaySignature_(secret, timestamp, nonce) {
+  return hmacHex_(secret, timestamp + ':' + nonce);
 }
 
 /**
- * Builds the two headers every relay call (callDiscordApi_ and
- * testDiscordRelayConnection) sends instead of the bare X-Relay-Secret
- * this used to be: a timestamp plus an HMAC signature over it, so the
- * secret itself never has to be compared as a static bearer token
- * (constant-time compare covers that either way) and, more importantly,
- * a captured request can't be replayed past SIGNATURE_WINDOW_MS the way
- * a bare shared secret could be indefinitely. See worker.js's
- * verifyRelaySignature_ for the matching check.
+ * Builds the three headers every relay call (callDiscordApi_ and
+ * testDiscordRelayConnection) sends: a timestamp, a random one-time
+ * nonce, and an HMAC signature over both, so a captured request can't
+ * be replayed - not past SIGNATURE_WINDOW_MS (the timestamp check),
+ * and not even within that window, since the worker rejects a nonce
+ * it's already seen. See worker.js's verifyRelayRequest_ for the
+ * matching check.
  * @param {string} secret
  * @return {Object} headers to merge into a UrlFetchApp options object
  */
 function buildRelayAuthHeaders_(secret) {
   var timestamp = Date.now();
+  var nonce = Utilities.getUuid();
   return {
     'X-Relay-Timestamp': String(timestamp),
-    'X-Relay-Signature': computeRelaySignature_(secret, timestamp)
+    'X-Relay-Nonce': nonce,
+    'X-Relay-Signature': computeRelaySignature_(secret, timestamp, nonce)
   };
 }
 
@@ -2773,9 +2774,26 @@ function doGet(e) {
  * @param {Object} e Apps Script's standard doPost event object.
  * @return {TextOutput} JSON { ok: true, ... } or { ok: false, error }.
  */
-/** HMAC-SHA256(secret, "action:row:sheetName:timestamp") - must match worker.js's computeWebhookSignature_. */
-function computeWebhookSignature_(secret, action, row, sheetName, timestamp) {
-  return hmacHex_(secret, action + ':' + row + ':' + sheetName + ':' + timestamp);
+/**
+ * Builds a stable, order-independent string of every payload field
+ * (except "signature") for HMAC signing - "key=JSON.stringify(value)"
+ * pairs sorted by key and joined with "&", so the signature covers the
+ * whole body instead of a fixed field subset. Must match worker.js's
+ * canonicalizePayload_.
+ * @param {Object} payload
+ * @return {string}
+ */
+function canonicalizePayload_(payload) {
+  return Object.keys(payload)
+    .filter(function(key) { return key !== 'signature'; })
+    .sort()
+    .map(function(key) { return key + '=' + JSON.stringify(payload[key]); })
+    .join('&');
+}
+
+/** HMAC-SHA256(secret, canonicalized payload) - must match worker.js's computeWebhookSignature_. */
+function computeWebhookSignature_(secret, payload) {
+  return hmacHex_(secret, canonicalizePayload_(payload));
 }
 
 function doPost(e) {
@@ -2807,8 +2825,7 @@ function doPost(e) {
     if (!timestamp || Math.abs(Date.now() - timestamp) > SIGNATURE_WINDOW_MS) {
       return jsonTextOutput_({ ok: false, error: 'Forbidden - missing or stale timestamp' });
     }
-    var actionForSignature = payload.action || 'write';
-    var expectedSignature = computeWebhookSignature_(expectedSecret, actionForSignature, row, sheetName, timestamp);
+    var expectedSignature = computeWebhookSignature_(expectedSecret, payload);
     if (!timingSafeEqual_(String(payload.signature || ''), expectedSignature)) {
       return jsonTextOutput_({ ok: false, error: 'Forbidden - bad or missing signature' });
     }
