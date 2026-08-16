@@ -1,4 +1,4 @@
-// Bot version: 20260807.5
+// Bot version: 20260815.2
 /**
  * =====================================================================
  * Discord API Relay + Interactions - Cloudflare Worker
@@ -912,6 +912,9 @@ async function updateThreadLastHiddenKing_(threadId, hiddenKingTeam, env) {
  * only stripped once a winner is actually on the books (see
  * finishMatchComplete_ and finishRecordWinner_), at which point the
  * "who won?" buttons, if any were posted, come down too.
+ *
+ * If a "who won?" vote is already pending for this row, a press here
+ * doesn't re-check Statlocker at all - see bumpPendingWinnerVote_.
  */
 async function handleMatchCompleteClick_(interaction, env, ctx) {
   const threadId = interaction.channel_id;
@@ -933,8 +936,82 @@ async function handleMatchCompleteClick_(interaction, env, ctx) {
     return ephemeral("Only someone from " + threadState.team1 + ", " + threadState.team2 + ", or a moderator can do this.");
   }
 
+  // If a "who won?" vote is already pending for this row, don't kick off
+  // a second, independent Statlocker re-check alongside it. The two
+  // paths write the same Winner cell via separate webhook calls
+  // (matchComplete vs recordWinner), and if they land close enough
+  // together they can both see the cell as empty and both advance the
+  // series - see bumpPendingWinnerVote_'s docstring for the race this
+  // closes. Just resurface the existing prompt at the bottom of the
+  // thread instead of starting a competing resolution.
+  const pendingStored = await env.MATCH_STATE.get("pending_winner:" + threadId);
+  if (pendingStored) {
+    ctx.waitUntil(bumpPendingWinnerVote_(interaction, JSON.parse(pendingStored), threadId, env));
+    return jsonResponse({ type: 6 });
+  }
+
   ctx.waitUntil(finishMatchComplete_(interaction, threadState, env));
   return jsonResponse({ type: 6 }); // DEFERRED_UPDATE_MESSAGE - no visual change; the button stays as-is
+}
+
+/**
+ * Re-posts an already-pending "who won?" prompt at the bottom of the
+ * thread, in place of running a second, independent Statlocker check.
+ *
+ * Before this existed, the "Match Complete" button stayed live and
+ * retryable even while a "who won?" vote was outstanding (by design -
+ * see handleMatchCompleteClick_'s JSDoc), with no link between the two.
+ * That meant a press on the old button while a vote was still pending
+ * kicked off finishMatchComplete_'s Statlocker re-check completely
+ * independently of the vote - and if that re-check and someone
+ * answering (or a moderator overriding) the pending vote landed close
+ * enough together, both could see the Winner cell as still empty and
+ * both call advanceSeriesAfterWin_, double-posting the next-step
+ * message (the "picks the side for Game 2" prompt appearing twice).
+ * Code.gs's own locking is meant to stop the underlying cell write from
+ * happening twice, but there's no reason to invite the race at all when
+ * a vote is already in flight for this exact row.
+ *
+ * This strips the previous prompt's buttons (via the bot token, since
+ * its own interaction token may be long expired by the time someone
+ * re-presses Match Complete) and posts a fresh copy at the bottom, so
+ * there's only ever one live "who won?" prompt per row and pressing
+ * Match Complete again just brings it back into view instead of racing
+ * it.
+ * @param {Object} interaction the Match Complete click's interaction
+ * @param {Object} pending the "pending_winner:" KV entry
+ * @param {string} threadId
+ * @param {Object} env
+ */
+async function bumpPendingWinnerVote_(interaction, pending, threadId, env) {
+  if (pending.whoWonMessageId) {
+    await editChannelMessage_(threadId, pending.whoWonMessageId,
+      "Who won this match?\n(Moved below - see the newest prompt.)", [], env);
+  }
+
+  const components = [{
+    type: 1,
+    components: [
+      { type: 2, style: 1, label: pending.team1.slice(0, 80), custom_id: "winnerTeam1" },
+      { type: 2, style: 1, label: pending.team2.slice(0, 80), custom_id: "winnerTeam2" }
+    ]
+  }];
+
+  let statusText = "Who won this match? Both teams need to agree (or a moderator can settle it).";
+  if (pending.votes && (pending.votes.team1 || pending.votes.team2)) {
+    const votedKey = pending.votes.team1 ? "team1" : "team2";
+    const voterTeamName = votedKey === "team1" ? pending.team1 : pending.team2;
+    const otherTeamName = votedKey === "team1" ? pending.team2 : pending.team1;
+    statusText = "Who won this match?\n" + voterTeamName + " says **" + pending.votes[votedKey] +
+      "**. Waiting on " + otherTeamName + " to confirm (or a moderator to settle it).";
+  }
+
+  const bumped = await postFollowupMessage_(interaction, statusText, components, env);
+
+  pending.whoWonMessageId = bumped && bumped.id;
+  await env.MATCH_STATE.put("pending_winner:" + threadId, JSON.stringify(pending), {
+    expirationTtl: MATCH_STATE_TTL_SECONDS
+  });
 }
 
 /**
@@ -962,6 +1039,26 @@ async function handleMatchCompleteClick_(interaction, env, ctx) {
 async function finishMatchComplete_(interaction, threadState, env) {
   const activeRow = threadState.rows[threadState.gameIndex];
   const threadId = interaction.channel_id;
+
+  // Claim this row before doing anything else - see Code.gs's
+  // claimWinnerResolution_ docstring for why this exists on top of
+  // (rather than instead of) the checks already inside
+  // runMatchCompleteFetch_/recordManualWinner_: those alone let two
+  // genuinely-simultaneous doPost calls both proceed in practice (see
+  // bumpPendingWinnerVote_'s docstring for the incident that surfaced
+  // this). Losing the claim means some other resolution attempt for
+  // this exact row is already in flight - back off without touching
+  // Statlocker or the sheet at all.
+  let claim;
+  try {
+    claim = await callSheetWebhookAction_(activeRow, threadState.sheetName, { action: "claimWinnerResolution" }, env);
+  } catch (err) {
+    claim = null; // fail open - see the same reasoning in finishDraftCreation_'s claim check
+  }
+  if (claim && claim.ok === true && claim.claimed === false) {
+    await postFollowupMessage_(interaction, "Someone else is already checking this match's result - give it a moment and check below.", [], env);
+    return;
+  }
 
   // The message the "Match Complete" button itself sits on - needed so
   // a later, separate interaction (a "who won?" vote) can still find
@@ -1323,6 +1420,23 @@ async function handleTeamVote_(interaction, threadId, voterKey, winnerName, env)
  *   was reached.
  */
 async function finishRecordWinner_(interaction, pending, winnerName, env, reasonSuffix) {
+  // Same claim as finishMatchComplete_ - see Code.gs's
+  // claimWinnerResolution_ docstring. Losing it here means an
+  // automatic Statlocker check (or another "who won?" resolution) for
+  // this exact row is already in flight; back off rather than racing
+  // it to the Winner cell.
+  let claim;
+  try {
+    claim = await callSheetWebhookAction_(pending.row, pending.sheetName, { action: "claimWinnerResolution" }, env);
+  } catch (err) {
+    claim = null; // fail open - same posture as finishDraftCreation_'s claim check
+  }
+  if (claim && claim.ok === true && claim.claimed === false) {
+    await editOriginalInteractionResponse_(interaction,
+      "Who won this match?\nSomeone else is already resolving this - check below in a moment.", [], env);
+    return;
+  }
+
   let result;
   try {
     result = await callSheetWebhookAction_(pending.row, pending.sheetName, { action: "recordWinner", winner: winnerName }, env);
