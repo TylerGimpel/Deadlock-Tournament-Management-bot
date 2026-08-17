@@ -3,9 +3,14 @@
 
   // Patched automatically by setup.js when you answer "Worker name" -
   // leave this default in place, it'll be overwritten.
-  "name": "deadlock-tournament-management-bot",
+  "name": "discord-relay",
 
   "main": "worker.js",
+
+  // Added by upgrade.js: don't let this deploy overwrite MODERATOR_ROLE_IDS
+  // or the emoji vars already configured on the target Worker with the
+  // blank ones in this fresh copy of the file.
+  "keep_vars": true,
   "compatibility_date": "2026-07-22",
 
   // The Worker's memory (see Installation Guide Part C / worker.js's
@@ -27,7 +32,7 @@
   // NOT here - setup.js sets those as real Worker secrets via
   // `wrangler secret put`, not as plain vars.
   "vars": {
-    "MODERATOR_ROLE_IDS": "",
+    "MODERATOR_ROLE_IDS": "1419951255886893096, 1351249565147332648",
     "SIDE_A_EMOJI_ID": "",
     "SIDE_A_EMOJI_NAME": "",
     "SIDE_B_EMOJI_ID": "",

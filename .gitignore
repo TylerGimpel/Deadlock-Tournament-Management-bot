@@ -22,3 +22,20 @@ Thumbs.db
 # Properties, never to disk here), ignore it too:
 .env
 .env.*
+# Dev-only personal tool for pushing Spreadsheet Code updates to the
+# private TEMPLATE spreadsheet (hardcodes its Script ID) - never
+# shipped, never meant for end users.
+bin/upgrade-template-sheet.js
+run-upgrade-template.bat
+bin/run-upgrade-template.ps1
+bin/template-upgrade-workspace/
+bin/template-backups/
+git-push.bat
+
+# Scratch workspace/backups clasp creates when upgrade-sheet.js is run
+# from a local checkout (already gitignored when shipped standalone in
+# the installer zip, just never had a rule here for the repo itself)
+bin/sheet-upgrade-workspace/
+bin/sheet-backups/
+bin/.clasp.json
+
