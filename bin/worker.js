@@ -1,4 +1,4 @@
-// Bot version: 20260815.2
+// Bot version: 20261002.1
 /**
  * =====================================================================
  * Discord API Relay + Interactions - Cloudflare Worker
@@ -38,19 +38,24 @@
  *    is also where a best-of-X series' win threshold and per-game side
  *    overrides are recorded up front - see handleRegisterThread.
  *
- * 3. SIDE SELECTION TRIGGER (/internal/coinflip): Apps Script calls
- *    this once, right after thread registration, to decide who picks
- *    a side for game 1. Normally that's a coin flip; if Apps Script
- *    detected a bold-cell override for that row (see Code.gs's
- *    getSideSignalsForRow_), the flip is skipped and that team is
- *    given the pick directly instead - either way, the result is
- *    written to KV and a message with two side-selection buttons is
- *    posted into the thread (optionally with small icons - see
- *    sideSelectionButtons_). If Apps Script instead detected an
- *    underline override (a stronger signal - see getSideSignalsForRow_
- *    again), there's no pick to make at all: the team is locked onto
- *    Hidden King directly, no buttons posted, and the draft is created
- *    immediately - see runHiddenKingLock_. See handleCoinflip.
+ * 3. SIDE + PICK ORDER SELECTION TRIGGER (/internal/coinflip): Apps
+ *    Script calls this once, right after thread registration, to
+ *    decide who gets choice priority for game 1. Side (Hidden King/
+ *    Archmother) and pick order (First/Second Pick) are decoupled:
+ *    the team with choice priority first chooses WHICH of the two
+ *    they want to decide (Side Selection or Pick Order), then makes
+ *    that choice, and the other team makes the remaining one - see
+ *    handleSelectionClick_. Choice priority normally comes from a coin
+ *    flip; if Apps Script detected a bold-cell override for that row
+ *    (see Code.gs's getSideSignalsForRow_), the flip is skipped and
+ *    that team is given priority directly instead - either way, the
+ *    result is written to KV and a message with Side Selection/Pick
+ *    Order buttons is posted into the thread. If Apps Script instead
+ *    detected an underline override (a stronger signal - see
+ *    getSideSignalsForRow_ again), the side is already decided: the
+ *    team is locked onto Hidden King directly and only the Archmother
+ *    team is asked for First/Second Pick - see runHiddenKingLock_.
+ *    See handleCoinflip.
  *
  * 4. INTERACTIONS ENDPOINT (/interactions): Discord itself calls this
  *    directly - not via the relay secret - whenever someone clicks one
@@ -63,12 +68,15 @@
  *    bot process to host, just this same worker. See handleInteraction
  *    / handleButtonClick.
  *
- * 5. STATLOCKER DRAFT CREATION: the moment someone clicks a side
- *    button, this worker calls Statlocker's POST /api/public-draft/
- *    draft directly (no Apps Script round trip for the creation
- *    itself) with the two team names slotted into the correct side.
- *    The coinflip message is edited in place just to show which side
- *    was picked (buttons stripped), but the resulting draft URL and
+ * 5. STATLOCKER DRAFT CREATION: the moment the second of the two
+ *    choices (side and pick order) is made, this worker calls
+ *    Statlocker's POST /api/public-draft/draft directly (no Apps
+ *    Script round trip for the creation itself) with the two team
+ *    names slotted into the correct side, and tells the sheet which
+ *    team has First Pick (moved into Team 1) and which side each team
+ *    is on (Team 1/Team 2 cells colored by side). The final selection
+ *    message is edited in place just to show the sides and pick order
+ *    (buttons stripped), but the resulting draft URL and
  *    "Match Complete" button are posted as a brand-new message, so
  *    they land at the bottom of the thread rather than back up where
  *    the coinflip happened. Separately calls back into Apps Script
@@ -76,7 +84,7 @@
  *    the URL lands in the sheet too. Since all of this can occasionally
  *    run past Discord's 3-second ack window, the click is acknowledged
  *    immediately (type 6, DEFERRED_UPDATE_MESSAGE) and the rest
- *    happens afterward via ctx.waitUntil. See handleSideClick_ /
+ *    happens afterward via ctx.waitUntil. See handleSelectionClick_ /
  *    finishDraftCreation_.
  *
  * 6. MATCH COMPLETION: pressing "Match Complete" calls back into Apps
@@ -117,14 +125,15 @@
  *    that row (locks a team onto Hidden King directly, or - if both
  *    cells were underlined - swaps Hidden King/Archmother from
  *    whichever team held Hidden King last game, via
- *    threadState.lastHiddenKingTeam) beats a bold override for that row
- *    (automatic side selection, but the team still picks) beats the
- *    default: whichever team just LOST the game that finished picks
- *    (standard best-of-X practice). A bold-or-default pick reuses the
- *    exact same KV shape and sideA/sideB buttons as job 3, so job 4's
- *    handleSideClick_ needs no changes to handle it; an underline
- *    override skips buttons entirely, same as job 3's own underline
- *    path - see runHiddenKingLock_. No new thread is ever created
+ *    threadState.lastHiddenKingTeam; the Archmother team then chooses
+ *    pick order) beats a bold override for that row (automatic choice
+ *    priority, but the team still chooses) beats the default:
+ *    whichever team just LOST the game that finished gets choice
+ *    priority (standard best-of-X practice). A bold-or-default prompt
+ *    reuses the exact same KV shape and buttons as job 3, so job 4's
+ *    handleSelectionClick_ needs no changes to handle it; an underline
+ *    override starts straight at the pick order step, same as job 3's
+ *    own underline path - see runHiddenKingLock_. No new thread is ever created
  *    partway through a series - see Code.gs's buildMatchThreadEntries_
  *    for how a run of sequential same-matchup rows becomes one series
  *    in the first place.
@@ -335,20 +344,72 @@ function sideSelectionButtons_(sideALabel, sideBLabel, env) {
 }
 
 /**
+ * The first button row the choosing team sees (coinflip winner, bold
+ * override, or a previous game's loser): which of the two decoupled
+ * choices - side or pick order - they want to make themselves. The
+ * other team gets whichever one isn't picked here. See
+ * handleSelectionClick_.
+ * @return {Array<Object>} a single Discord action row component
+ */
+function choiceTypeButtons_() {
+  return [{
+    type: 1,
+    components: [
+      { type: 2, style: 1, label: "Side Selection", custom_id: "chooseSide" },
+      { type: 2, style: 1, label: "Pick Order", custom_id: "choosePick" }
+    ]
+  }];
+}
+
+/**
+ * The First Pick / Second Pick button row - shown either to the
+ * choosing team (if they chose Pick Order) or to the other team (if
+ * the choosing team chose Side Selection, or the side was locked by an
+ * underline override - see runHiddenKingLock_).
+ * @return {Array<Object>} a single Discord action row component
+ */
+function pickOrderButtons_() {
+  return [{
+    type: 1,
+    components: [
+      { type: 2, style: 1, label: "First Pick", custom_id: "pickFirst" },
+      { type: 2, style: 1, label: "Second Pick", custom_id: "pickSecond" }
+    ]
+  }];
+}
+
+function otherTeamKey_(teamKey) {
+  return teamKey === "team1" ? "team2" : "team1";
+}
+
+/**
+ * @param {Object} match a "match:" KV entry (or anything else carrying
+ *   team1/team2/team1RoleId/team2RoleId)
+ * @param {string} teamKey 'team1' or 'team2'
+ * @return {{key: string, name: string, roleId: string}}
+ */
+function teamInfo_(match, teamKey) {
+  return { key: teamKey, name: match[teamKey], roleId: match[teamKey + "RoleId"] };
+}
+
+/**
  * =====================================================================
- * 3. SIDE SELECTION TRIGGER - called once by Apps Script right after a
+ * 3. SIDE + PICK ORDER SELECTION TRIGGER - called once by Apps Script right after a
  *    match thread is created
  * =====================================================================
- * Normally flips a coin for game 1's side selection. If Apps Script
- * sends an overrideTeam ('team1' or 'team2' - set when exactly one of
- * that row's Team 1/Team 2 cells was bold, see getSideSignalsForRow_
- * in Code.gs), the flip is skipped entirely and that team is given
- * side selection directly instead (they still pick which side via the
- * buttons). If Apps Script instead sends a hiddenKingTeam ('team1' or
- * 'team2' - set when exactly one cell was underlined), there's no pick
- * to make at all - that team is locked onto Hidden King directly, no
- * buttons posted, no KV "match:" entry needed, and the draft is created
- * immediately via runHiddenKingLock_. hiddenKingTeam always takes
+ * Normally flips a coin for game 1's choice priority: the winner
+ * chooses whether to pick their side (Hidden King/Archmother) or their
+ * pick order (First/Second Pick), makes that choice, and the other
+ * team then makes the remaining one - see handleSelectionClick_. If
+ * Apps Script sends an overrideTeam ('team1' or 'team2' - set when
+ * exactly one of that row's Team 1/Team 2 cells was bold, see
+ * getSideSignalsForRow_ in Code.gs), the flip is skipped entirely and
+ * that team is given choice priority directly instead (they still
+ * choose via the buttons). If Apps Script instead sends a
+ * hiddenKingTeam ('team1' or 'team2' - set when exactly one cell was
+ * underlined), the side is already decided - that team is locked onto
+ * Hidden King directly, and only the Archmother team is asked to
+ * choose First/Second Pick via runHiddenKingLock_. hiddenKingTeam always takes
  * priority over overrideTeam when Apps Script somehow sends both,
  * though getSideSignalsForRow_ never sets both for the same row.
  */
@@ -369,20 +430,22 @@ async function handleCoinflip(request, env) {
     return jsonResponse({ message: "Missing one of: threadId, row, sheetName, team1, team2, team1RoleId, team2RoleId" }, 400);
   }
 
-  if (hiddenKingTeam === "team1" || hiddenKingTeam === "team2") {
-    const amber = hiddenKingTeam === "team1"
-      ? { name: team1, roleId: team1RoleId }
-      : { name: team2, roleId: team2RoleId };
-    const sapphire = hiddenKingTeam === "team1"
-      ? { name: team2, roleId: team2RoleId }
-      : { name: team1, roleId: team1RoleId };
-    const resolvedSideALabel = sideALabel || "Hidden King";
-    const resolvedSideBLabel = sideBLabel || "Archmother";
-    const reasonLine = "**" + amber.name + "** automatically on " + resolvedSideALabel + ":";
+  const baseState = {
+    row, sheetName, team1, team2, team1RoleId, team2RoleId, round,
+    sideALabel: sideALabel || "Hidden King",
+    sideBLabel: sideBLabel || "Archmother"
+  };
 
-    await runHiddenKingLock_(threadId, row, sheetName, amber, sapphire, resolvedSideALabel, resolvedSideBLabel, reasonLine, env);
+  if (hiddenKingTeam === "team1" || hiddenKingTeam === "team2") {
+    const amberName = hiddenKingTeam === "team1" ? team1 : team2;
+    const reasonLine = "**" + amberName + "** automatically on " + baseState.sideALabel + ":";
+
+    const posted = await runHiddenKingLock_(threadId, baseState, hiddenKingTeam, reasonLine, env);
+    if (!posted) {
+      return jsonResponse({ message: "Posting the Hidden King lock message to Discord failed - see the Worker logs." }, 502);
+    }
     await updateThreadLastHiddenKing_(threadId, hiddenKingTeam, env);
-    return jsonResponse({ ok: true, winningTeam: amber.name });
+    return jsonResponse({ ok: true, winningTeam: amberName });
   }
 
   const isOverride = overrideTeam === "team1" || overrideTeam === "team2";
@@ -390,24 +453,28 @@ async function handleCoinflip(request, env) {
   const winningTeamName = winningTeam === "team1" ? team1 : team2;
   const winningRoleId = winningTeam === "team1" ? team1RoleId : team2RoleId;
 
-  const matchState = {
-    row, sheetName, team1, team2, team1RoleId, team2RoleId, round,
-    sideALabel: sideALabel || "Hidden King",
-    sideBLabel: sideBLabel || "Archmother",
+  // "winningTeam" is the team with choice priority - see
+  // handleSelectionClick_ for the stage machine this starts.
+  const matchState = Object.assign({}, baseState, {
     winningTeam, winningTeamName, winningRoleId,
+    stage: "category",
+    chooserCategory: null,
+    amberTeam: null,
+    firstPickTeam: null,
     resolved: false
-  };
+  });
 
   await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(matchState), {
     expirationTtl: MATCH_STATE_TTL_SECONDS
   });
 
   // Bold override skips the flip, so it gets its own message - no
-  // "won the coin flip" language for a side that was never at risk.
-  const content = isOverride
-    ? "<@&" + winningRoleId + "> gets automatic side selection. Choose your side:"
-    : "<@&" + winningRoleId + "> won the coin flip! Choose your side:";
-  const components = sideSelectionButtons_(matchState.sideALabel, matchState.sideBLabel, env);
+  // "won the coin flip" language for a choice that was never at risk.
+  const content = (isOverride
+    ? "<@&" + winningRoleId + "> gets automatic choice priority."
+    : "<@&" + winningRoleId + "> won the coin flip!") +
+    " Choose whether you want to pick your **side** or your **pick order** - the other team gets the remaining choice:";
+  const components = choiceTypeButtons_();
 
   let discordResponse;
   try {
@@ -455,7 +522,7 @@ async function handleCoinflip(request, env) {
  *    getSideOverrideForRow_ (bold on exactly one of that row's Team 1/
  *    Team 2 cells). advanceSeriesAfterWin_ checks the entry for
  *    whichever row is about to become active and, if set, gives that
- *    team automatic side selection instead of applying the normal
+ *    team automatic choice priority instead of applying the normal
  *    losers-pick rule.
  * =====================================================================
  */
@@ -554,16 +621,18 @@ async function handleInteraction(request, env, ctx) {
 
 /**
  * Routes a button click to the right handler by custom_id:
- *   - "sideA" / "sideB": side selection (coinflip winner, bold
- *     override, or a losers-pick from the previous game) -> handleSideClick_
+ *   - "chooseSide" / "choosePick" / "sideA" / "sideB" / "pickFirst" /
+ *     "pickSecond": the side + pick order selection flow (coinflip
+ *     winner, bold override, or a losers-pick from the previous game
+ *     choosing first, then the other team) -> handleSelectionClick_
  *   - "matchComplete": the persistent per-thread button -> handleMatchCompleteClick_
  *   - "winnerTeam1" / "winnerTeam2": the "who won?" follow-up buttons -> handleWinnerClick_
  */
 async function handleButtonClick(interaction, env, ctx) {
   const customId = interaction.data && interaction.data.custom_id;
 
-  if (customId === "sideA" || customId === "sideB") {
-    return handleSideClick_(interaction, env, ctx);
+  if (SELECTION_BUTTON_IDS.indexOf(customId) !== -1) {
+    return handleSelectionClick_(interaction, env, ctx);
   }
   if (customId === "matchComplete") {
     return handleMatchCompleteClick_(interaction, env, ctx);
@@ -575,64 +644,117 @@ async function handleButtonClick(interaction, env, ctx) {
   return jsonResponse({ type: 4, data: { content: "Unrecognized button.", flags: 64 } });
 }
 
+// Every button custom_id that belongs to the side + pick order
+// selection flow - see handleSelectionClick_.
+const SELECTION_BUTTON_IDS = ["chooseSide", "choosePick", "sideA", "sideB", "pickFirst", "pickSecond"];
+
 /**
- * Works out which team ends up on which side (Hidden King/Amber vs
- * Archmother/Sapphire) for a side-selection click, and the message
- * lines announcing it. Pulled out of finishDraftCreation_ so
- * handleSideClick_ can build the exact same content for its immediate
- * ack (see below) without the two copies drifting apart.
- * @param {Object} match this match's stored state
- * @param {string} customId "sideA" or "sideB" - which button was clicked
- * @return {{amberTeamName: string, amberRoleId: string,
- *   sapphireTeamName: string, sapphireRoleId: string,
- *   amberTeamKey: string, sideLines: Array<string>}}
+ * Works out, for a "match:" KV entry's current stage, which team is
+ * expected to click next, which category ('side' or 'pick') they're
+ * choosing in, and which buttons are valid right now. The stages, in
+ * order:
+ *   - "category": the team with choice priority (match.winningTeam -
+ *     coinflip winner, bold override, or previous game's loser)
+ *     chooses Side Selection or Pick Order.
+ *   - "chooserSelect": that same team makes the choice they picked
+ *     (Hidden King/Archmother, or First/Second Pick).
+ *   - "otherSelect": the other team makes the remaining choice. An
+ *     underline Hidden King lock starts here directly, with the side
+ *     already filled in - see runHiddenKingLock_.
+ * @param {Object} match
+ * @return {{actorKey: string, category: ?string, validIds: Array<string>}}
  */
-function computeSideAssignment_(match, customId) {
-  const losingTeamName = match.winningTeam === "team1" ? match.team2 : match.team1;
-  const losingRoleId = match.winningTeam === "team1" ? match.team2RoleId : match.team1RoleId;
+function selectionStep_(match) {
+  const sideIds = ["sideA", "sideB"];
+  const pickIds = ["pickFirst", "pickSecond"];
+  if (match.stage === "category") {
+    return { actorKey: match.winningTeam, category: null, validIds: ["chooseSide", "choosePick"] };
+  }
+  if (match.stage === "chooserSelect") {
+    const category = match.chooserCategory;
+    return { actorKey: match.winningTeam, category, validIds: category === "side" ? sideIds : pickIds };
+  }
+  const category = match.chooserCategory === "side" ? "pick" : "side";
+  return { actorKey: otherTeamKey_(match.winningTeam), category, validIds: category === "side" ? sideIds : pickIds };
+}
 
-  // sideA == Hidden King (Amber side) == Statlocker "team1".
-  // sideB == Archmother (Sapphire side) == Statlocker "team2".
-  // Whoever won the flip picked one of those; the loser gets the other.
-  const amberTeamName = customId === "sideA" ? match.winningTeamName : losingTeamName;
-  const amberRoleId = customId === "sideA" ? match.winningRoleId : losingRoleId;
-  const sapphireTeamName = customId === "sideA" ? losingTeamName : match.winningTeamName;
-  const sapphireRoleId = customId === "sideA" ? losingRoleId : match.winningRoleId;
-  const amberTeamKey = customId === "sideA" ? match.winningTeam : (match.winningTeam === "team1" ? "team2" : "team1");
-
-  // Always listed Hidden King first, Archmother second - regardless of
-  // which one the clicker actually picked - so the side order in the
-  // message is consistent from game to game rather than depending on
-  // who chose what.
-  const sideLines = [
-    "Side chosen!",
-    match.sideALabel + ": <@&" + amberRoleId + "> (" + amberTeamName + ")",
-    match.sideBLabel + ": <@&" + sapphireRoleId + "> (" + sapphireTeamName + ")"
-  ];
-
-  return { amberTeamName, amberRoleId, sapphireTeamName, sapphireRoleId, amberTeamKey, sideLines };
+/** Human-readable label for a side/pick button, for messages. */
+function selectionLabel_(match, customId) {
+  if (customId === "sideA") return match.sideALabel;
+  if (customId === "sideB") return match.sideBLabel;
+  if (customId === "pickFirst") return "First Pick";
+  return "Second Pick";
 }
 
 /**
- * Handles a side-selection button click. Validation (unknown button,
- * expired match state, already resolved, wrong clicker) is fast and
- * happens synchronously, well within Discord's 3-second ack window.
- *
- * Once validation passes, the click is acknowledged with UPDATE_MESSAGE
- * (type 7) rather than a deferred ack - the response itself edits the
- * message in place, stripping the side buttons synchronously as part
- * of the same round trip that Discord is already waiting on. That
- * closes the main real-world trigger for a duplicate draft: someone
- * clicking a second time because the buttons are still visibly sitting
- * there while finishDraftCreation_'s Statlocker/sheet calls (several
- * seconds) run in the background. It doesn't fully close a true
- * sub-second double-tap on both buttons at once - see
- * finishDraftCreation_'s claim check for that.
- * The actual Statlocker draft creation + follow-up message happen
- * afterward in finishDraftCreation_, kept alive past the response via
- * ctx.waitUntil so the worker isn't torn down mid-request.
+ * Records a side or pick order click onto the match state, as seen
+ * from the clicking team (actorKey).
  */
-async function handleSideClick_(interaction, env, ctx) {
+function applySelection_(match, actorKey, customId) {
+  if (customId === "sideA") match.amberTeam = actorKey;
+  if (customId === "sideB") match.amberTeam = otherTeamKey_(actorKey);
+  if (customId === "pickFirst") match.firstPickTeam = actorKey;
+  if (customId === "pickSecond") match.firstPickTeam = otherTeamKey_(actorKey);
+}
+
+/**
+ * Works out which team ends up on which side (Hidden King/Amber vs
+ * Archmother/Sapphire) and which team has First Pick, once both
+ * choices have been made, plus the message lines announcing it. Shared
+ * by handleSelectionClick_'s immediate ack and finishDraftCreation_'s
+ * final edit so the two copies can't drift apart.
+ * @param {Object} match this match's stored state (amberTeam and
+ *   firstPickTeam both set)
+ * @return {{amber: Object, sapphire: Object, firstPick: Object,
+ *   secondPick: Object, lines: Array<string>}}
+ */
+function computeFinalAssignment_(match) {
+  const amber = teamInfo_(match, match.amberTeam);
+  const sapphire = teamInfo_(match, otherTeamKey_(match.amberTeam));
+  const firstPick = teamInfo_(match, match.firstPickTeam);
+  const secondPick = teamInfo_(match, otherTeamKey_(match.firstPickTeam));
+
+  // Always listed Hidden King first, then Archmother, then First/Second
+  // Pick - regardless of who chose what - so the layout is consistent
+  // from game to game.
+  const lines = [
+    "Side and pick order chosen!",
+    match.sideALabel + ": <@&" + amber.roleId + "> (" + amber.name + ")",
+    match.sideBLabel + ": <@&" + sapphire.roleId + "> (" + sapphire.name + ")",
+    "First Pick: <@&" + firstPick.roleId + "> (" + firstPick.name + ")",
+    "Second Pick: <@&" + secondPick.roleId + "> (" + secondPick.name + ")"
+  ];
+
+  return { amber, sapphire, firstPick, secondPick, lines };
+}
+
+/**
+ * Handles every click in the side + pick order selection flow (see
+ * selectionStep_ for the stages). Validation (expired match state,
+ * already resolved, stale button, wrong clicker) is fast and happens
+ * synchronously, well within Discord's 3-second ack window.
+ *
+ * Each click is acknowledged with UPDATE_MESSAGE (type 7), editing the
+ * clicked message in place and stripping/replacing its buttons in the
+ * same round trip:
+ *   - category click: the same message switches to that team's side
+ *     or pick order buttons.
+ *   - choosing team's selection: the message becomes a record of the
+ *     choice, and a NEW message pinging the other team (an edit
+ *     wouldn't notify them) carries the remaining buttons - see
+ *     postNextSelectionPrompt_.
+ *   - other team's selection: both choices are known, so the message
+ *     shows the final sides + pick order and the Statlocker draft is
+ *     created in the background via finishDraftCreation_ (kept alive
+ *     past the response via ctx.waitUntil). Stripping the buttons in
+ *     the ack closes the main real-world trigger for a duplicate draft
+ *     (a second click while they're still visible); finishDraftCreation_'s
+ *     claim check covers a true sub-second double-tap.
+ *
+ * Moderators (MODERATOR_ROLE_IDS) can click on behalf of whichever team
+ * is expected at each stage.
+ */
+async function handleSelectionClick_(interaction, env, ctx) {
   const customId = interaction.data && interaction.data.custom_id;
 
   const threadId = interaction.channel_id;
@@ -643,62 +765,154 @@ async function handleSideClick_(interaction, env, ctx) {
 
   const match = JSON.parse(stored);
   if (match.resolved) {
-    return ephemeral("This match's side has already been decided.");
+    return ephemeral("This match's side and pick order have already been decided.");
+  }
+  if (!match.stage) {
+    // Stored by an older copy of this worker (side-only prompt already
+    // posted) - treat it as the choosing team having picked Side
+    // Selection, so the other team still gets asked for pick order.
+    match.stage = "chooserSelect";
+    match.chooserCategory = "side";
   }
 
+  const step = selectionStep_(match);
+  if (step.validIds.indexOf(customId) === -1) {
+    return ephemeral("That button isn't active anymore - use the newest selection message in this thread.");
+  }
+
+  const actor = teamInfo_(match, step.actorKey);
   const clickerRoles = (interaction.member && interaction.member.roles) || [];
-  if (clickerRoles.indexOf(match.winningRoleId) === -1 && !clickerHasModeratorRole_(interaction, env)) {
-    return ephemeral("Only someone on " + match.winningTeamName + " (the coinflip winner) - or a moderator - can make this call.");
+  if (clickerRoles.indexOf(actor.roleId) === -1 && !clickerHasModeratorRole_(interaction, env)) {
+    return ephemeral("Only someone on " + actor.name + " - or a moderator - can make this call.");
   }
 
+  if (match.stage === "category") {
+    const choseSide = customId === "chooseSide";
+    match.chooserCategory = choseSide ? "side" : "pick";
+    match.stage = "chooserSelect";
+    await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(match), {
+      expirationTtl: MATCH_STATE_TTL_SECONDS
+    });
+
+    return jsonResponse({
+      type: 7, // UPDATE_MESSAGE
+      data: {
+        content: "<@&" + actor.roleId + "> (" + actor.name + ") chose **" + (choseSide ? "Side Selection" : "Pick Order") + "**. " +
+          (choseSide ? "Choose your side:" : "Choose your pick order:"),
+        components: choseSide ? sideSelectionButtons_(match.sideALabel, match.sideBLabel, env) : pickOrderButtons_(),
+        allowed_mentions: { parse: ["roles"] }
+      }
+    });
+  }
+
+  applySelection_(match, step.actorKey, customId);
+  const choiceLabel = selectionLabel_(match, customId);
+
+  if (match.stage === "chooserSelect") {
+    match.stage = "otherSelect";
+    await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(match), {
+      expirationTtl: MATCH_STATE_TTL_SECONDS
+    });
+
+    const other = teamInfo_(match, otherTeamKey_(step.actorKey));
+    const remainingIsSide = match.chooserCategory === "pick";
+    const recordLine = "**" + actor.name + "** chose " + (remainingIsSide ? "Pick Order" : "Side Selection") +
+      ": **" + choiceLabel + "**.";
+    const promptContent = "<@&" + other.roleId + "> (" + other.name + "), " + actor.name + " chose **" + choiceLabel + "**. " +
+      (remainingIsSide ? "Choose your side:" : "Choose your pick order:");
+    const components = remainingIsSide
+      ? sideSelectionButtons_(match.sideALabel, match.sideBLabel, env)
+      : pickOrderButtons_();
+
+    ctx.waitUntil(postNextSelectionPrompt_(interaction, recordLine, promptContent, components, env));
+
+    return jsonResponse({
+      type: 7, // UPDATE_MESSAGE
+      data: { content: recordLine, components: [], allowed_mentions: { parse: ["roles"] } }
+    });
+  }
+
+  // stage === "otherSelect" - both choices are now known.
   match.resolved = true;
   await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(match), {
     expirationTtl: MATCH_STATE_TTL_SECONDS
   });
 
-  const { sideLines } = computeSideAssignment_(match, customId);
+  const { lines } = computeFinalAssignment_(match);
 
   // Ack now (editing the message and clearing its buttons in the same
   // response), do the Statlocker call + follow-up message in the
   // background.
-  ctx.waitUntil(finishDraftCreation_(interaction, match, customId, env));
+  ctx.waitUntil(finishDraftCreation_(interaction, match, env));
 
   return jsonResponse({
     type: 7, // UPDATE_MESSAGE
     data: {
-      content: sideLines.join("\n") + "\n⏳ Creating your draft...",
+      content: lines.join("\n") + "\n⏳ Creating your draft...",
       components: [],
       allowed_mentions: { parse: ["roles"] }
     }
   });
 }
 
+function sleep_(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Runs after the click has already been ack'd: immediately posts a
- * "still working" placeholder (see below), then creates the Statlocker
- * draft with the two team names slotted into the correct side, then
- * edits the original coinflip message in place with the final result
- * (or with a fallback message telling the organizer to run /draft
- * create by hand, if Statlocker's API call fails for any reason).
+ * Posts the other team's prompt (with the remaining side or pick order
+ * buttons) as a new follow-up message, so their role ping actually
+ * notifies them. Discord only accepts a follow-up once it has received
+ * this click's ack - which is still in flight when this starts under
+ * ctx.waitUntil - so this waits briefly and retries rather than
+ * failing on the first attempt. If every attempt fails, the prompt and
+ * buttons are put back on the clicked message itself instead, so the
+ * flow is never stranded (that edit won't ping anyone, but the buttons
+ * still work).
+ * @param {Object} interaction the raw Discord interaction payload
+ * @param {string} recordLine what the clicked message already says
+ * @param {string} promptContent the other team's prompt
+ * @param {Array<Object>} components the remaining choice's buttons
+ * @param {Object} env
+ */
+async function postNextSelectionPrompt_(interaction, recordLine, promptContent, components, env) {
+  for (const delayMs of [500, 1500, 3000]) {
+    await sleep_(delayMs);
+    try {
+      if (await postFollowupMessage_(interaction, promptContent, components, env)) return;
+    } catch (err) {
+      console.error("Posting the next selection prompt failed: " + err.message);
+    }
+  }
+  await editOriginalInteractionResponse_(interaction, recordLine + "\n" + promptContent, components, env);
+}
+
+/**
+ * Runs after the final selection click has already been ack'd: creates
+ * the Statlocker draft with the two team names slotted into the
+ * correct side, then edits the final selection message in place with
+ * the result (or with a fallback message telling the organizer to run
+ * /draft create by hand, if Statlocker's API call fails for any
+ * reason).
  *
  * Starts with a dedup claim through Apps Script's LockService (see
  * Code.gs's claimSideResolution_) before doing anything else. This is
- * the real fix for the underlying race: handleSideClick_'s "resolved"
- * flag lives in Cloudflare KV, which has no atomic compare-and-swap,
- * so two clicks landing close enough together can both pass that
- * check before either write lands and both end up here. Losing the
- * claim means another call already owns this row's draft creation, so
- * this call backs off immediately - no Statlocker draft, no further
- * message edits (the caller who won the claim already owns those).
- * If the claim call itself fails (e.g. Apps Script unreachable), this
- * fails open and proceeds rather than blocking the whole flow on it -
- * same best-effort posture as the sheet-sync calls further down,
- * consistent with the rest of this function.
+ * the real fix for the underlying race: handleSelectionClick_'s
+ * "resolved" flag lives in Cloudflare KV, which has no atomic
+ * compare-and-swap, so two clicks landing close enough together can
+ * both pass that check before either write lands and both end up here.
+ * Losing the claim means another call already owns this row's draft
+ * creation, so this call backs off immediately - no Statlocker draft,
+ * no further message edits (the caller who won the claim already owns
+ * those). If the claim call itself fails (e.g. Apps Script
+ * unreachable), this fails open and proceeds rather than blocking the
+ * whole flow on it - same best-effort posture as the sheet-sync calls
+ * further down, consistent with the rest of this function.
  * @param {Object} interaction the raw Discord interaction payload
- * @param {Object} match this match's stored state (already marked resolved)
- * @param {string} customId "sideA" or "sideB" - which button was clicked
+ * @param {Object} match this match's stored state (already marked
+ *   resolved, with amberTeam and firstPickTeam set)
  */
-async function finishDraftCreation_(interaction, match, customId, env) {
+async function finishDraftCreation_(interaction, match, env) {
   try {
     const claim = await callSheetWebhookAction_(match.row, match.sheetName, { action: "claimSideResolution" }, env);
     if (claim.ok === true && claim.claimed === false) {
@@ -709,7 +923,7 @@ async function finishDraftCreation_(interaction, match, customId, env) {
     console.error("Side-resolution claim check failed, proceeding anyway: " + err.message);
   }
 
-  const { amberTeamName, sapphireTeamName, amberTeamKey, sideLines } = computeSideAssignment_(match, customId);
+  const { amber, sapphire, firstPick, lines } = computeFinalAssignment_(match);
 
   // Best-effort: record which team ended up on Hidden King for THIS
   // game, so that IF a later game in this series has "both cells
@@ -718,32 +932,27 @@ async function finishDraftCreation_(interaction, match, customId, env) {
   // from. A failure here shouldn't block the rest of this flow - it
   // would only affect a swap game later, if this series even has one.
   try {
-    await updateThreadLastHiddenKing_(interaction.channel_id, amberTeamKey, env);
+    await updateThreadLastHiddenKing_(interaction.channel_id, amber.key, env);
   } catch (err) {
     console.error("Failed to record lastHiddenKingTeam: " + err.message);
   }
 
-  // The "still working" placeholder is already on the message - it was
-  // set synchronously in handleSideClick_'s UPDATE_MESSAGE ack (along
-  // with stripping the side buttons) rather than as a separate edit
-  // here, so there's no extra round trip before starting the actual
-  // work below.
-
   const draftLines = [];
 
-  // The side is already known at this point regardless of whether
-  // Statlocker creation succeeds below - push the sheet's Team 1/
-  // Team 2 order into sync right away rather than making it wait on
-  // (or fail alongside) an unrelated Statlocker outage.
+  // Sides and pick order are already known at this point regardless of
+  // whether Statlocker creation succeeds below - push them into the
+  // sheet (First Pick team into Team 1, cells colored by side - see
+  // Code.gs's applySideAndPickOrder_) right away rather than making it
+  // wait on (or fail alongside) an unrelated Statlocker outage.
   try {
-    await callSheetWebhook_(match.row, match.sheetName, { hiddenKingTeam: amberTeamName }, env);
+    await callSheetWebhook_(match.row, match.sheetName, { hiddenKingTeam: amber.name, firstPickTeam: firstPick.name }, env);
   } catch (sheetErr) {
-    draftLines.push("(Couldn't sync Team 1/Team 2 order in the sheet: " + sheetErr.message + ".)");
+    draftLines.push("(Couldn't sync Team 1/Team 2 order and side colors in the sheet: " + sheetErr.message + ".)");
   }
 
   let draftUrlCreated = false;
   try {
-    const draft = await createStatlockerDraft_(amberTeamName, sapphireTeamName, env);
+    const draft = await createStatlockerDraft_(amber.name, sapphire.name, env);
     draftLines.push("Draft created: " + draft.draftUrl);
     draftUrlCreated = true;
 
@@ -761,17 +970,17 @@ async function finishDraftCreation_(interaction, match, customId, env) {
   }
 
   // Once the draft attempt is settled, clear the "⏳ Creating your
-  // draft..." placeholder off the coinflip message - it stays as a
-  // clean, final record of which side was picked, with no loading text
-  // stuck on it forever.
-  await editOriginalInteractionResponse_(interaction, sideLines.join("\n"), [], env);
+  // draft..." placeholder off the selection message - it stays as a
+  // clean, final record of the sides and pick order, with no loading
+  // text stuck on it forever.
+  await editOriginalInteractionResponse_(interaction, lines.join("\n"), [], env);
 
   // "Match Complete" only makes sense once there's a draft URL to check
   // against, so it's posted here - right under the URL - rather than on
   // the thread's opening instructions post (see createForumThread_,
   // which carries no buttons of its own). See finishMatchComplete_ for
   // what happens when it's pressed. The draft link + button go in a
-  // brand-new message (rather than another edit to the coinflip
+  // brand-new message (rather than another edit to the selection
   // message above) so they land at the bottom of the thread, where
   // players are actually looking.
   const components = draftUrlCreated ? [{
@@ -785,83 +994,70 @@ async function finishDraftCreation_(interaction, match, customId, env) {
 }
 
 /**
- * The underline-override counterpart to finishDraftCreation_ above -
- * same end result (a Statlocker draft created with the right team on
- * each side, the sheet synced, a "Match Complete" button posted), but
- * with no coin flip AND no side-selection buttons for anyone to click,
- * since Code.gs already determined the side from underlined cells (see
- * getSideSignalsForRow_). Because there's no button click here, there's
- * no interaction to reply to either - this posts and then edits its own
- * message directly via postChannelMessage_/editChannelMessage_ (bot
- * token) instead of the interaction-webhook helpers finishDraftCreation_
- * uses. Called from two places: handleCoinflip, for a game 1 whose row
- * had exactly one cell underlined, and advanceSeriesAfterWin_, for a
- * later game whose row had one cell underlined OR both cells underlined
- * (a swap, already resolved to a concrete amber/sapphire team by the
- * caller before this function is ever called - this function doesn't
- * need to know which case it was).
+ * The underline-override path: Code.gs already determined the side
+ * from underlined cells (see getSideSignalsForRow_), so there's no coin
+ * flip and no side choice for anyone to make. Pick order is still
+ * open, though, and goes to the team that DIDN'T get locked onto
+ * Hidden King - this posts the locked sides plus First/Second Pick
+ * buttons for the Archmother team, and stores a "match:" KV entry that
+ * starts directly at handleSelectionClick_'s "otherSelect" stage (with
+ * the side already filled in). Their click then runs the exact same
+ * finishDraftCreation_ as every other path. Because there's no click
+ * to reply to yet, this posts via the bot token (postChannelMessage_)
+ * rather than an interaction webhook. Called from two places:
+ * handleCoinflip, for a game 1 whose row had exactly one cell
+ * underlined, and advanceSeriesAfterWin_, for a later game whose row
+ * had one cell underlined OR both cells underlined (a swap, already
+ * resolved to a concrete Hidden King team by the caller before this
+ * function is ever called - this function doesn't need to know which
+ * case it was).
  * @param {string} threadId
- * @param {number} row
- * @param {string} sheetName
- * @param {{name: string, roleId: string}} amberTeam Hidden King side
- * @param {{name: string, roleId: string}} sapphireTeam Archmother side
- * @param {string} sideALabel
- * @param {string} sideBLabel
+ * @param {Object} baseState row, sheetName, team1, team2, team1RoleId,
+ *   team2RoleId, round, sideALabel, sideBLabel
+ * @param {string} amberKey 'team1' or 'team2' - the team locked onto
+ *   Hidden King
  * @param {string} reasonLine shown as the message's opening line -
  *   phrased by the caller so it can say "underlined" vs "swapped from
  *   last game" as appropriate.
  * @param {Object} env
+ * @return {Promise<boolean>} false if the message couldn't be posted
  */
-async function runHiddenKingLock_(threadId, row, sheetName, amberTeam, sapphireTeam, sideALabel, sideBLabel, reasonLine, env) {
-  const openingLines = [
+async function runHiddenKingLock_(threadId, baseState, amberKey, reasonLine, env) {
+  const amber = teamInfo_(baseState, amberKey);
+  const sapphire = teamInfo_(baseState, otherTeamKey_(amberKey));
+
+  const matchState = Object.assign({}, baseState, {
+    winningTeam: amberKey,
+    winningTeamName: amber.name,
+    winningRoleId: amber.roleId,
+    stage: "otherSelect",
+    chooserCategory: "side",
+    amberTeam: amberKey,
+    firstPickTeam: null,
+    resolved: false
+  });
+  await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(matchState), {
+    expirationTtl: MATCH_STATE_TTL_SECONDS
+  });
+
+  const content = [
     reasonLine,
-    sideALabel + ": <@&" + amberTeam.roleId + "> (" + amberTeam.name + ")",
-    sideBLabel + ": <@&" + sapphireTeam.roleId + "> (" + sapphireTeam.name + ")",
-    ""
-  ];
+    baseState.sideALabel + ": <@&" + amber.roleId + "> (" + amber.name + ")",
+    baseState.sideBLabel + ": <@&" + sapphire.roleId + "> (" + sapphire.name + ")",
+    "",
+    "<@&" + sapphire.roleId + "> (" + sapphire.name + "), you're on " + baseState.sideBLabel + ", so you choose your pick order:"
+  ].join("\n");
 
-  let message;
   try {
-    message = await postChannelMessage_(threadId, openingLines.join("\n") + "\n⏳ Creating your draft...", [], env);
+    await postChannelMessage_(threadId, content, pickOrderButtons_(), env);
+    return true;
   } catch (err) {
-    // Nothing posted at all - log it so it's visible in Cloudflare's
-    // Worker logs, same as the other places a Discord post can fail
-    // silently from the person's point of view.
+    // Log it so it's visible in Cloudflare's Worker logs, same as the
+    // other places a Discord post can fail silently from the person's
+    // point of view.
     console.error("Failed to post Hidden King lock message: " + err.message);
-    return;
+    return false;
   }
-
-  const resultLines = openingLines.slice();
-
-  try {
-    await callSheetWebhook_(row, sheetName, { hiddenKingTeam: amberTeam.name }, env);
-  } catch (sheetErr) {
-    resultLines.push("(Couldn't sync Team 1/Team 2 order in the sheet: " + sheetErr.message + ".)");
-  }
-
-  let draftUrlCreated = false;
-  try {
-    const draft = await createStatlockerDraft_(amberTeam.name, sapphireTeam.name, env);
-    resultLines.push("Draft created: " + draft.draftUrl);
-    draftUrlCreated = true;
-
-    try {
-      await callSheetWebhook_(row, sheetName, { draftUrl: draft.draftUrl }, env);
-    } catch (sheetErr) {
-      resultLines.push("(Couldn't write the URL into the sheet automatically: " + sheetErr.message + " - paste it into row " + row + " by hand.)");
-    }
-  } catch (err) {
-    resultLines.push("Couldn't auto-create the Statlocker draft (" + err.message + "). Run `/draft create` manually.");
-  }
-
-  const components = draftUrlCreated ? [{
-    type: 1,
-    components: [
-      { type: 2, style: 3, label: 'Match Complete', custom_id: 'matchComplete' }
-    ]
-  }] : [];
-
-  await editChannelMessage_(threadId, message.id, resultLines.join("\n"), components, env);
 }
 
 /**
@@ -1518,31 +1714,31 @@ async function finishRecordWinner_(interaction, pending, winnerName, env, reason
  *          (see Code.gs's getSideSignalsForRow_) - locks a team onto
  *          Hidden King directly (or, for 'swap', flips whoever held
  *          Hidden King in threadState.lastHiddenKingTeam) with no
- *          coinflip AND no buttons - via runHiddenKingLock_.
+ *          side choice; the Archmother team only chooses First/Second
+ *          Pick - via runHiddenKingLock_.
  *       2. a bold override in threadState.sideOverrides (see the same
- *          getSideSignalsForRow_) - that team gets side selection
- *          instead of the loser, but still picks via buttons.
+ *          getSideSignalsForRow_) - that team gets choice priority
+ *          instead of the loser, but still chooses via buttons.
  *       3. the default: whichever team just LOST the game that
- *          finished gets side selection (not a coinflip - the loser
- *          choosing side going into the next game is standard
- *          best-of-X practice, and is what was asked for).
+ *          finished gets choice priority (not a coinflip - the loser
+ *          choosing first going into the next game is standard
+ *          best-of-X practice).
  *     Cases 2 and 3 post a new follow-up message carrying the same
- *     sideA/sideB buttons handleSideClick_ already knows how to
- *     handle; case 1 skips buttons entirely and creates the draft
- *     immediately, same as game 1's own underline path in
- *     handleCoinflip.
+ *     Side Selection/Pick Order buttons handleSelectionClick_ already
+ *     knows how to handle; case 1 starts straight at the pick order
+ *     step, same as game 1's own underline path in handleCoinflip.
  *
  * For cases 2 and 3, the "match:" KV entry this builds for the next
  * game is the exact same shape a coinflip produces (row, sheetName,
  * team1, team2, role IDs, round, side labels,
- * winningTeam/winningTeamName/winningRoleId, resolved) - so
- * finishDraftCreation_ needs no changes at all to run the next game's
- * draft creation once that button is clicked. "winningTeam"/
- * "winningRoleId" there just mean "the team whose click decides the
- * side", regardless of whether that team won a coinflip, lost the
- * previous game, or has a bold override - finishDraftCreation_ never
- * needs to know which. Case 1 skips "match:" KV entirely, since there's
- * no click to look it up for.
+ * winningTeam/winningTeamName/winningRoleId, stage, resolved) - so
+ * handleSelectionClick_/finishDraftCreation_ need no changes at all to
+ * run the next game's selection and draft creation. "winningTeam"/
+ * "winningRoleId" there just mean "the team with choice priority",
+ * regardless of whether that team won a coinflip, lost the previous
+ * game, or has a bold override - neither function needs to know
+ * which. Case 1's entry (written by runHiddenKingLock_) is the same
+ * shape too, just starting at the "otherSelect" stage.
  * @param {Object} interaction the raw Discord interaction that
  *   triggered this (used only to know which thread/channel to post
  *   the next message into, via postFollowupMessage_)
@@ -1647,40 +1843,7 @@ async function advanceSeriesAfterWin_(interaction, threadState, winnerName, env)
     forcedAmberKey = threadState.lastHiddenKingTeam === "team1" ? "team2" : "team1";
   }
 
-  if (forcedAmberKey) {
-    const forcedSapphireKey = forcedAmberKey === "team1" ? "team2" : "team1";
-    const amber = { name: threadState[forcedAmberKey], roleId: threadState[forcedAmberKey + "RoleId"] };
-    const sapphire = { name: threadState[forcedSapphireKey], roleId: threadState[forcedSapphireKey + "RoleId"] };
-    const sideALabel = threadState.sideALabel || "Hidden King";
-    const sideBLabel = threadState.sideBLabel || "Archmother";
-    const reasonLine = hiddenKingOverride === "swap"
-      ? ("Sides swapped from last game: **" + amber.name + "** is now on " + sideALabel + ":")
-      : ("**" + amber.name + "** is automatically on " + sideALabel + " for Game " + (gameNumber + 1) + ":");
-
-    return {
-      scoreLine: "Game " + gameNumber + " complete (" + scoreText + ") - Starting Game " + (gameNumber + 1) + ".",
-      postAdvance: async function () {
-        await runHiddenKingLock_(threadId, threadState.rows[nextGameIndex], threadState.sheetName, amber, sapphire, sideALabel, sideBLabel, reasonLine, env);
-        await updateThreadLastHiddenKing_(threadId, forcedAmberKey, env);
-      }
-    };
-  }
-
-  // Series continues - normally whichever team just LOST this game
-  // gets side selection for the next one, UNLESS that next game's row
-  // has a bold override (threadState.sideOverrides[nextGameIndex] -
-  // see Code.gs's getSideSignalsForRow_), in which case the override
-  // team gets it instead and the losers-pick rule is skipped entirely
-  // for this game.
-  const override = threadState.sideOverrides && threadState.sideOverrides[nextGameIndex];
-  const isOverride = override === "team1" || override === "team2";
-  const loserIsTeam1 = winnerIsTeam2;
-
-  const pickerIsTeam1 = isOverride ? override === "team1" : loserIsTeam1;
-  const pickerName = pickerIsTeam1 ? threadState.team1 : threadState.team2;
-  const pickerRoleId = pickerIsTeam1 ? threadState.team1RoleId : threadState.team2RoleId;
-
-  const matchState = {
+  const baseState = {
     row: threadState.rows[nextGameIndex],
     sheetName: threadState.sheetName,
     team1: threadState.team1,
@@ -1689,12 +1852,48 @@ async function advanceSeriesAfterWin_(interaction, threadState, winnerName, env)
     team2RoleId: threadState.team2RoleId,
     round: threadState.round,
     sideALabel: threadState.sideALabel || "Hidden King",
-    sideBLabel: threadState.sideBLabel || "Archmother",
+    sideBLabel: threadState.sideBLabel || "Archmother"
+  };
+
+  if (forcedAmberKey) {
+    const amberName = threadState[forcedAmberKey];
+    const reasonLine = hiddenKingOverride === "swap"
+      ? ("Sides swapped from last game: **" + amberName + "** is now on " + baseState.sideALabel + ":")
+      : ("**" + amberName + "** is automatically on " + baseState.sideALabel + " for Game " + (gameNumber + 1) + ":");
+
+    return {
+      scoreLine: "Game " + gameNumber + " complete (" + scoreText + ") - Starting Game " + (gameNumber + 1) + ".",
+      postAdvance: async function () {
+        await runHiddenKingLock_(threadId, baseState, forcedAmberKey, reasonLine, env);
+        await updateThreadLastHiddenKing_(threadId, forcedAmberKey, env);
+      }
+    };
+  }
+
+  // Series continues - normally whichever team just LOST this game
+  // gets choice priority (side or pick order first) for the next one,
+  // UNLESS that next game's row has a bold override
+  // (threadState.sideOverrides[nextGameIndex] - see Code.gs's
+  // getSideSignalsForRow_), in which case the override team gets it
+  // instead and the losers-pick rule is skipped entirely for this game.
+  const override = threadState.sideOverrides && threadState.sideOverrides[nextGameIndex];
+  const isOverride = override === "team1" || override === "team2";
+  const loserIsTeam1 = winnerIsTeam2;
+
+  const pickerIsTeam1 = isOverride ? override === "team1" : loserIsTeam1;
+  const pickerName = pickerIsTeam1 ? threadState.team1 : threadState.team2;
+  const pickerRoleId = pickerIsTeam1 ? threadState.team1RoleId : threadState.team2RoleId;
+
+  const matchState = Object.assign({}, baseState, {
     winningTeam: pickerIsTeam1 ? "team1" : "team2",
     winningTeamName: pickerName,
     winningRoleId: pickerRoleId,
+    stage: "category",
+    chooserCategory: null,
+    amberTeam: null,
+    firstPickTeam: null,
     resolved: false
-  };
+  });
   await env.MATCH_STATE.put("match:" + threadId, JSON.stringify(matchState), {
     expirationTtl: MATCH_STATE_TTL_SECONDS
   });
@@ -1702,11 +1901,12 @@ async function advanceSeriesAfterWin_(interaction, threadState, winnerName, env)
   // Deliberately doesn't restate "Game N goes to <winner> (score)" here -
   // the caller's own edit (built from this function's returned
   // scoreLine, below) already declares that. This message's only job
-  // is the part that edit can't cover: who picks next and why.
-  const promptLine = isOverride
-    ? ("<@&" + pickerRoleId + "> (" + pickerName + ") gets Side Selection Priority for Game " + (gameNumber + 1) + ":")
-    : ("<@&" + pickerRoleId + "> lost Game " + gameNumber + ", so " + pickerName + " picks the side for Game " + (gameNumber + 1) + ":");
-  const components = sideSelectionButtons_(matchState.sideALabel, matchState.sideBLabel, env);
+  // is the part that edit can't cover: who chooses next and why.
+  const promptLine = (isOverride
+    ? ("<@&" + pickerRoleId + "> (" + pickerName + ") gets choice priority for Game " + (gameNumber + 1) + ".")
+    : ("<@&" + pickerRoleId + "> lost Game " + gameNumber + ", so " + pickerName + " gets choice priority for Game " + (gameNumber + 1) + ".")) +
+    " Choose whether you want to pick your **side** or your **pick order** - the other team gets the remaining choice:";
+  const components = choiceTypeButtons_();
 
   return {
     scoreLine: "Game " + gameNumber + " complete (" + scoreText + ") - Starting Game " + (gameNumber + 1) + ".",

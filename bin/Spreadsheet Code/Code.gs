@@ -1,4 +1,4 @@
-// Bot version: 20260815.2
+// Bot version: 20261002.1
 /**
  * =====================================================================
  * Deadlock Tournament Management Bot for Google Sheets
@@ -133,7 +133,8 @@
  *
  *    SIDE SELECTION OVERRIDE: if, for a given row, exactly ONE of that
  *    row's Team 1/Team 2 cells is bold (bold on both, or neither, does
- *    nothing), that team gets automatic side selection for that game -
+ *    nothing), that team gets automatic choice priority (choosing side
+ *    or pick order first, as if they'd won the coinflip) for that game -
  *    no coinflip for game 1, and the losers-pick rule is skipped for
  *    later games in a series. This is checked per row/game, so a
  *    best-of-3 can have game 1 decided by coinflip, game 2 overridden
@@ -143,28 +144,36 @@
  *    getSideSignalsForRow_ and buildMatchThreadEntries_.
  *
  *    UNDERLINE OVERRIDE (Hidden King lock): also checked at "Create
- *    Match Threads" time, alongside bold, but stronger - it skips the
- *    side-selection BUTTONS too, not just the coinflip:
+ *    Match Threads" time, alongside bold, but stronger - it decides
+ *    the side outright, not just who chooses first:
  *      - Exactly ONE of a row's Team 1/Team 2 cells underlined -> that
  *        team is placed on Hidden King automatically for that game, no
- *        coinflip and no buttons; the draft is created immediately.
+ *        coinflip and no side choice; the Archmother team is asked to
+ *        choose First/Second Pick, then the draft is created.
  *      - BOTH cells underlined, on game 2 or later of a series -> the
  *        two teams swap sides from the previous game (last game's
  *        Hidden King becomes Archmother, and vice versa), again with
- *        no coinflip/buttons.
+ *        no coinflip/side choice - the new Archmother team chooses
+ *        pick order.
  *      - BOTH cells underlined on game 1 of a series (nothing to swap
  *        from yet), one team underlined while the other is bold, or
  *        any single cell that's both bold AND underlined, are all
  *        treated as ambiguous - the row falls back to the standard
  *        coinflip/losers-pick rule as if neither bold nor underline
  *        were set at all. See getSideSignalsForRow_.
- * 7. When a team picks a side in Discord, whichever team ends up on
- *    Hidden King is swapped into the Team 1 cell if it isn't already
- *    there (Team 2 gets the other team) - so Team 1 always means
- *    "Hidden King side" from that point on. This happens automatically
- *    the moment the button is clicked, pushed from the Worker straight
- *    into the sheet - see the SIDE SWAP WEBHOOK section further down,
- *    and INSTALL step 7 for the one-time setup it needs.
+ * 7. Side and pick order are chosen separately in Discord: the team
+ *    that wins the coinflip (or has a bold override, or lost the
+ *    previous game in a series) chooses whether to pick their side
+ *    (Hidden King/Archmother) or their pick order (First/Second Pick),
+ *    makes that choice, and the other team makes the remaining one.
+ *    Once both are chosen, whichever team has First Pick is swapped
+ *    into the Team 1 cell if it isn't already there (Team 2 gets the
+ *    other team) - so Team 1 always means "First Pick" from that point
+ *    on - and the two cells are colored by side (SIDE_A_COLOR for
+ *    Hidden King, SIDE_B_COLOR for Archmother). This happens
+ *    automatically, pushed from the Worker straight into the sheet -
+ *    see applySideAndPickOrder_ further down, and INSTALL step 7 for
+ *    the one-time setup it needs.
  * 8. If the Worker also auto-creates a Statlocker draft once a side is
  *    chosen, that draft's URL is written into the row's Draft URL
  *    column automatically too - no need to paste it in by hand, and no
@@ -183,10 +192,10 @@
  *    as steps 6-8 above - nothing extra to configure.
  * 10. If the row that just got a winner is part of a best-of-X series
  *    (step 6) and the series isn't decided yet, the bot automatically
- *    moves on to the next row in that same block: it posts side-choice
- *    buttons for the team that just LOST the game (their reward for
- *    losing is picking the more favorable side next game - standard
- *    best-of-X practice), and once clicked, steps 7-9 repeat for that
+ *    moves on to the next row in that same block: it gives choice
+ *    priority (side or pick order first) to the team that just LOST
+ *    the game (standard best-of-X practice), and once both choices are
+ *    made, steps 7-9 repeat for that
  *    next row, all inside the SAME thread. This continues until one
  *    team reaches a majority of the series' rows (2 of 3, 3 of 5, ...),
  *    at which point the bot posts the series result and stops - no new
@@ -712,16 +721,16 @@ function createForumThread_(forumChannelId, name, content) {
  * @param {?string} overrideTeam 'team1', 'team2', or null/undefined -
  *   the bold signal from getSideSignalsForRow_ for this row. When set,
  *   the worker skips the random coinflip entirely and gives that team
- *   automatic side selection instead (they still pick which side via
- *   the buttons). See the SIDE SELECTION OVERRIDE note on
+ *   automatic choice priority instead (they still choose side or pick
+ *   order first via the buttons). See the SIDE SELECTION OVERRIDE note on
  *   createMatchThreads() above.
  * @param {?string} hiddenKingTeam 'team1', 'team2', or null/undefined -
  *   the underline signal from getSideSignalsForRow_ for this row (it
  *   can never be 'swap' for game 1, since "both underlined" on game 1
  *   is ambiguous and resolves to null instead - see
  *   getSideSignalsForRow_). When set, the worker skips both the
- *   coinflip AND the side-selection buttons, locking that team onto
- *   Hidden King and creating the draft immediately. Takes priority
+ *   coinflip AND the side choice, locking that team onto Hidden King
+ *   and only asking the Archmother team for First/Second Pick. Takes priority
  *   over overrideTeam when both are somehow set, though
  *   getSideSignalsForRow_ never sets both at once for the same row.
  */
@@ -774,13 +783,15 @@ function startCoinflip_(threadId, row, sheetName, team1, team2, team1RoleId, tea
  * @param {Array<?string>} sideOverrides parallel to rows - each entry
  *   'team1', 'team2', or null - the bold signal from
  *   getSideSignalsForRow_ for that row. Lets the worker give a team
- *   automatic side selection for game 2/3/etc (they still pick which
- *   side), skipping the losers-pick rule for that specific game - see
+ *   automatic choice priority for game 2/3/etc (they still choose
+ *   side or pick order first), skipping the losers-pick rule for that
+ *   specific game - see
  *   advanceSeriesAfterWin_ in discord-relay-worker.js.
  * @param {Array<?string>} hiddenKingOverrides parallel to rows - each
  *   entry 'team1', 'team2', 'swap', or null - the underline signal
  *   from getSideSignalsForRow_ for that row. 'team1'/'team2' locks that
- *   team onto Hidden King directly (no coinflip, no buttons); 'swap'
+ *   team onto Hidden King directly (no coinflip, no side choice - the
+ *   other team only picks First/Second Pick); 'swap'
  *   means both cells were underlined for a game 2+ row, so that game's
  *   sides swap from whatever the previous game's Hidden King/Archmother
  *   assignment turns out to be - resolved dynamically as the series
@@ -863,7 +874,7 @@ var DISCORD_MATCHES_FORUM_CHANNEL_ID = '';
 // Both forms actually ping (see createForumThread_'s allowed_mentions).
 var DEFAULT_MATCH_THREAD_MESSAGE_TEMPLATE =
   '{{team1}} {{team2}} here\'s your match channel for {{round}} ({{bestOf}}).\n' +
-  'In a moment, this bot will flip a coin to give one team side selection. The winning team will choose their side with the buttons provided. This will create your draft lobby.\n\n' +
+  'In a moment, this bot will flip a coin. The winning team chooses whether to pick their side or their pick order (First/Second Pick) first, then the other team picks the remaining option with the buttons provided. This will create your draft lobby.\n\n' +
   'Once the draft is complete, a game lobby code will appear in the draft website for everyone to join.\n' +
   'Once your match concludes, press the "Match Complete" button below the draft link further down this thread. This bot will pull the result from Statlocker automatically - if it\'s not there yet, it\'ll ask which team won.\n' +
   'Please ping <@12345678912345678> or a @Tournament Admin if anything goes wrong.\n' +
@@ -874,6 +885,15 @@ var MATCH_THREAD_MESSAGE_TEMPLATE = DEFAULT_MATCH_THREAD_MESSAGE_TEMPLATE;
 // Deadlock's two official side names - fixed, not user-configurable.
 var SIDE_A_LABEL = 'Hidden King';
 var SIDE_B_LABEL = 'Archmother';
+
+// Background colors applied to a row's Team 1/Team 2 cells once sides
+// are chosen (see applySideAndPickOrder_) - Team 1/Team 2 order means
+// pick order (Team 1 = First Pick), so the cell color is what shows
+// which side each team is on. Amber-ish for Hidden King, sapphire-ish
+// for Archmother. The Winner cell copies whichever of these the
+// winning team has (see applyWinnerColor_).
+var SIDE_A_COLOR = '#f9cb9c';
+var SIDE_B_COLOR = '#9fc5e8';
 
 // Raw request/response lines collected during the CURRENT execution when
 // DEBUG_MODE is on - reset and read by fetchDraftData() so the sidebar
@@ -1912,7 +1932,7 @@ function writeDraftRowToSheet(sheet, sourceCellA1, heroNames) {
  * pressed on each row in turn (see MATCH COMPLETION further down).
  *
  * SIDE SELECTION OVERRIDE: for each row, if exactly one of its Team 1/
- * Team 2 cells is bold, that team gets automatic side selection for
+ * Team 2 cells is bold, that team gets automatic choice priority for
  * that specific game - no coinflip (game 1) and no losers-pick (later
  * games). Bold on both cells or neither is not an override.
  *
@@ -2263,19 +2283,19 @@ function isRoundCellUnderlined_(sheet, row) {
  * signals this bot understands - bold and underline:
  *
  *   - BOLD on exactly one of the two cells means that team gets
- *     automatic side selection for this row's game - no coinflip, and
+ *     automatic choice priority for this row's game - no coinflip, and
  *     (for game 2+) the losers-pick rule is skipped - but the team
- *     still PICKS which side it wants via the normal buttons. Bold on
+ *     still chooses side or pick order first via the normal buttons. Bold on
  *     both cells, or on neither, is not an override.
  *
  *   - UNDERLINE on exactly one of the two cells means that team is
  *     locked onto Hidden King directly for this game - no coinflip AND
- *     no side-selection buttons; the draft is created immediately with
- *     that team on Hidden King.
+ *     no side choice; the other (Archmother) team only chooses First/
+ *     Second Pick, then the draft is created.
  *
  *   - UNDERLINE on BOTH cells means the two teams swap sides from the
  *     previous game (whoever was Hidden King last game becomes
- *     Archmother, and vice versa) - again with no coinflip/buttons -
+ *     Archmother, and vice versa) - again with no coinflip/side choice -
  *     but only from game 2 of a series onward, since game 1 has no
  *     previous game to swap from (see isFirstGameOfSeries below).
  *
@@ -2750,9 +2770,10 @@ function releaseWinnerClaim_(row, sheetName) {
  * manual action. One shared endpoint, four independent jobs, routed by
  * an explicit "action" field for two of them, and simply by which
  * fields are present in the body for the other two:
- *   - Side swap: the moment someone clicks a side-choice button in
- *     Discord, whichever team ended up on Hidden King is moved into
- *     the Team 1 cell (see applySideSwap_).
+ *   - Side + pick order: the moment both teams have made their
+ *     choices in Discord, whichever team has First Pick is moved into
+ *     the Team 1 cell and both cells are colored by side (see
+ *     applySideAndPickOrder_).
  *   - Draft URL: once the worker has also created the Statlocker draft
  *     for that match, its URL is written into the Draft URL column
  *     (see writeDraftUrl_) - the same cell fetchDraftData() already
@@ -2808,10 +2829,13 @@ function doGet(e) {
  * the raw secret - see computeWebhookSignature_ / doPost's own check.
  * Expects a JSON body:
  *   { timestamp: number, signature: string, row: number, sheetName: string,
- *     hiddenKingTeam?: string, draftUrl?: string }
- *   ...for the side-swap / draft-URL path (see applySideSwap_ /
- *   writeDraftUrl_) - either field may be present on its own, or both
- *   together in one call.
+ *     hiddenKingTeam?: string, firstPickTeam?: string, draftUrl?: string }
+ *   ...for the side + pick order / draft-URL path (see
+ *   applySideAndPickOrder_ / writeDraftUrl_) - hiddenKingTeam and
+ *   draftUrl may each be present on their own, or both together in one
+ *   call. firstPickTeam only means anything alongside hiddenKingTeam;
+ *   if it's missing (an older worker), the Hidden King team is treated
+ *   as First Pick, matching the old Team 1 = Hidden King behavior.
  *
  * It also routes two explicit action requests (see the MATCH
  * COMPLETION section above for both):
@@ -2932,15 +2956,16 @@ function doPost(e) {
       return jsonTextOutput_({ ok: false, error: 'Provide at least one of "hiddenKingTeam" or "draftUrl", or a valid "action"' });
     }
 
-    // Side-swap and draft-URL are independent writes - one failing (e.g.
-    // a team-name mismatch in applySideSwap_) must not prevent the other
+    // Side/pick order and draft-URL are independent writes - one failing (e.g.
+    // a team-name mismatch in applySideAndPickOrder_) must not prevent the other
     // from happening, so each gets its own try/catch instead of sharing
     // doPost's outer one.
     var result = { ok: true };
     var errors = [];
     if (payload.hiddenKingTeam) {
       try {
-        applySideSwap_(row, sheetName, String(payload.hiddenKingTeam));
+        applySideAndPickOrder_(row, sheetName, String(payload.hiddenKingTeam),
+          String(payload.firstPickTeam || payload.hiddenKingTeam));
         result.sideSwapped = true;
       } catch (err) {
         errors.push(err.message);
@@ -3022,36 +3047,50 @@ function markRowsNotPlayed_(rows, sheetName) {
 }
 
 /**
- * Ensures Team 1 is whichever team ended up on Hidden King for the
- * given row, swapping Team 1 <-> Team 2 if that team is currently in
- * the Team 2 cell. No-op if it's already Team 1. Throws if the given
+ * Records a row's decided sides and pick order in the sheet:
+ *   - Team 1 is whichever team has First Pick, swapping Team 1 <->
+ *     Team 2 if that team is currently in the Team 2 cell.
+ *   - Each team's cell is colored by side (SIDE_A_COLOR for Hidden
+ *     King, SIDE_B_COLOR for Archmother), so the side is still visible
+ *     at a glance now that Team 1/Team 2 order means pick order.
+ * Only the cell values move on a swap - the cells' own formatting
+ * (bold/underline signals etc.) stays where it is. Throws if either
  * name matches neither cell, rather than guessing - that's a real
  * inconsistency (e.g. a team renamed mid-tournament) worth surfacing
  * via the worker's own logs instead of silently doing nothing.
  * @param {number} row
  * @param {string} sheetName
  * @param {string} hiddenKingTeamName
+ * @param {string} firstPickTeamName
  */
-function applySideSwap_(row, sheetName, hiddenKingTeamName) {
+function applySideAndPickOrder_(row, sheetName, hiddenKingTeamName, firstPickTeamName) {
   var sheet = getSheetByNameOrThrow_(sheetName);
-  var team1Col = DRAFT_URL_COLUMN + TEAM1_NAME_OFFSET;
-  var team2Col = DRAFT_URL_COLUMN + TEAM2_NAME_OFFSET;
+  var team1Cell = sheet.getRange(row, DRAFT_URL_COLUMN + TEAM1_NAME_OFFSET);
+  var team2Cell = sheet.getRange(row, DRAFT_URL_COLUMN + TEAM2_NAME_OFFSET);
 
-  var team1 = String(sheet.getRange(row, team1Col).getValue() || '').trim();
-  var team2 = String(sheet.getRange(row, team2Col).getValue() || '').trim();
-  var target = normalizeTeamName_(hiddenKingTeamName);
+  var team1 = String(team1Cell.getValue() || '').trim();
+  var team2 = String(team2Cell.getValue() || '').trim();
 
-  if (normalizeTeamName_(team1) === target) {
-    return; // already Team 1 - nothing to do
+  var matchesWhich = function (name) {
+    var target = normalizeTeamName_(name);
+    if (normalizeTeamName_(team1) === target) return 1;
+    if (normalizeTeamName_(team2) === target) return 2;
+    throw new Error('"' + name + '" matched neither Team 1 ("' + team1 +
+      '") nor Team 2 ("' + team2 + '") in row ' + row + '.');
+  };
+  var firstPickCol = matchesWhich(firstPickTeamName);
+  var hiddenKingCol = matchesWhich(hiddenKingTeamName);
+
+  if (firstPickCol === 2) {
+    team1Cell.setValue(team2);
+    team2Cell.setValue(team1);
   }
-  if (normalizeTeamName_(team2) === target) {
-    sheet.getRange(row, team1Col).setValue(team2);
-    sheet.getRange(row, team2Col).setValue(team1);
-    return;
-  }
 
-  throw new Error('"' + hiddenKingTeamName + '" matched neither Team 1 ("' + team1 +
-    '") nor Team 2 ("' + team2 + '") in row ' + row + '.');
+  // After the swap above, Team 1 is the First Pick team - so Hidden
+  // King is in Team 1 exactly when the Hidden King team has First Pick.
+  var hiddenKingIsTeam1 = hiddenKingCol === firstPickCol;
+  team1Cell.setBackground(hiddenKingIsTeam1 ? SIDE_A_COLOR : SIDE_B_COLOR);
+  team2Cell.setBackground(hiddenKingIsTeam1 ? SIDE_B_COLOR : SIDE_A_COLOR);
 }
 
 /**
